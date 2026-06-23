@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link rel="stylesheet" href="/style.css"/>
+  <title>设置 - DeepSeek</title>
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <svg class="logo-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+        </svg>
+        <h1>设置</h1>
+      </div>
+      <span id="saveStatus" class="save-status"></span>
+    </header>
+
+    <main class="content">
+      <!-- 快捷键 -->
+      <section class="section">
+        <h2 class="section-title">全局快捷键</h2>
+        <p class="section-desc">呼出/隐藏 DeepSeek 窗口</p>
+        <div class="hotkey-group">
+          <div class="field">
+            <label class="field-label">修饰键</label>
+            <select id="modSelect" class="select">
+              <option value="Alt">Alt</option>
+              <option value="Ctrl">Ctrl</option>
+              <option value="Shift">Shift</option>
+              <option value="Win">Win</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label">按键</label>
+            <select id="keySelect" class="select">
+              <option value="">选择按键</option>
+              <optgroup label="字母">
+                <option value="A">A</option><option value="B">B</option><option value="C">C</option>
+                <option value="D">D</option><option value="E">E</option><option value="F">F</option>
+                <option value="G">G</option><option value="H">H</option><option value="I">I</option>
+                <option value="J">J</option><option value="K">K</option><option value="L">L</option>
+                <option value="M">M</option><option value="N">N</option><option value="O">O</option>
+                <option value="P">P</option><option value="Q">Q</option><option value="R">R</option>
+                <option value="S">S</option><option value="T">T</option><option value="U">U</option>
+                <option value="V">V</option><option value="W">W</option><option value="X">X</option>
+                <option value="Y">Y</option><option value="Z">Z</option>
+              </optgroup>
+              <optgroup label="数字">
+                <option value="0">0</option><option value="1">1</option><option value="2">2</option>
+                <option value="3">3</option><option value="4">4</option><option value="5">5</option>
+                <option value="6">6</option><option value="7">7</option><option value="8">8</option>
+                <option value="9">9</option>
+              </optgroup>
+              <optgroup label="功能键">
+                <option value="F1">F1</option><option value="F2">F2</option><option value="F3">F3</option>
+                <option value="F4">F4</option><option value="F5">F5</option><option value="F6">F6</option>
+                <option value="F7">F7</option><option value="F8">F8</option><option value="F9">F9</option>
+                <option value="F10">F10</option><option value="F11">F11</option><option value="F12">F12</option>
+              </optgroup>
+            </select>
+          </div>
+          <div class="hotkey-preview">
+            当前快捷键：<kbd id="hotkeyDisplay">Alt+E</kbd>
+          </div>
+          <div id="hotkeyError" class="error-msg"></div>
+        </div>
+      </section>
+
+      <!-- 开机自启 -->
+      <section class="section">
+        <div class="toggle-row">
+          <div>
+            <h2 class="section-title">开机自启</h2>
+            <p class="section-desc">登录时自动启动 DeepSeek</p>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="autoStartToggle"/>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
