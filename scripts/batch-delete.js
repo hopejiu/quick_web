@@ -113,6 +113,7 @@
     btnConfirm.innerHTML = '\u2713 \u5220\u9664 <span class="bd-badge" id="bdCount">0</span>';
 
     var checkboxes = [];
+    var deletedIds = new Set();
     var container1 = document.createElement('div');
     var container2 = document.createElement('div');
 
@@ -237,9 +238,17 @@
         try {
           for (var n = 0; n < mutations[m].addedNodes.length; n++) {
             var node = mutations[m].addedNodes[n];
-            if (node.tagName === 'A') node.parentElement.style.display = '';
+            if (node.tagName === 'A') {
+              var id = node.href.split('/').pop();
+              if (deletedIds.has(id)) {
+                log('MutationObserver hid re-created deleted session:', id);
+                node.style.display = 'none';
+                continue;
+              }
+              node.parentElement.style.display = '';
+            }
           }
-        } catch (e) { /* ignore */ }
+        } catch (e) { log('MutationObserver error:', e); }
       }
     });
     var inner = sidebar.querySelector('.ds-scroll-area');
@@ -258,6 +267,13 @@
       }
       var total = checked.length;
       log('confirmDelete called, checked:', total, 'total:', checkboxes.length);
+      log('checked IDs:', checked.map(function(c) { return c.name; }));
+
+      // log DOM state of checked chat elements before deletion
+      for (var ci = 0; ci < checked.length; ci++) {
+        var c = checked[ci];
+        log('cb.refer for', c.name, 'exists:', !!c.refer, 'parentNode:', !!c.refer.parentNode, 'href:', c.refer.href);
+      }
 
       showProgress(total);
 
@@ -265,42 +281,60 @@
         var done = 0;
         var promises = [];
         for (var i = 0; i < checked.length; i++) {
-          var cb = checked[i];
-          log('deleting session:', cb.name);
-          promises.push(
-            fetch('https://chat.deepseek.com/api/v0/chat_session/delete', {
-              credentials: 'include',
-              headers: {
-                'Accept': '*/*',
-                'authorization': 'Bearer ' + userToken,
-                'content-type': 'application/json'
-              },
-              body: JSON.stringify({ chat_session_id: cb.name }),
-              method: 'POST'
-            }).then(function(r) {
-              log('delete result for', cb.name, ':', r.status);
-              if (r.ok) {
-                if (cb.name === location.href.split('/').pop()) {
-                  log('current session deleted, creating new chat');
-                  btnNewChat.click();
+          (function(cb) {
+            log('deleting session:', cb.name);
+            log('request body:', JSON.stringify({ chat_session_id: cb.name }));
+            promises.push(
+              fetch('https://chat.deepseek.com/api/v0/chat_session/delete', {
+                credentials: 'include',
+                headers: {
+                  'Accept': '*/*',
+                  'authorization': 'Bearer ' + userToken,
+                  'content-type': 'application/json'
+                },
+                body: JSON.stringify({ chat_session_id: cb.name }),
+                method: 'POST'
+              }).then(function(r) {
+                // log status and clone response to read body
+                log('delete result for', cb.name, ':', r.status, r.statusText);
+                // try to read response body
+                r.clone().text().then(function(body) {
+                  log('response body for', cb.name, ':', body);
+                });
+                if (r.ok) {
+                  log('r.ok true for', cb.name, '- proceeding to remove DOM');
+                  var isCurrent = cb.name === location.href.split('/').pop();
+                  log('is current session?', isCurrent, '(current:', location.href.split('/').pop(), ')');
+                  if (isCurrent) {
+                    log('current session deleted, creating new chat via btnNewChat.click()');
+                    btnNewChat.click();
+                  }
+                  log('removing cb.refer from DOM, parentNode:', !!cb.refer.parentNode);
+                  cb.refer.remove();
+                  log('cb.refer removed, parentNode now:', !!cb.refer.parentNode);
+                  deletedIds.add(cb.name);
+                  log('deletedIds now has', deletedIds.size, 'entries');
+                } else {
+                  log('r.ok false for', cb.name, '- NOT removing DOM');
                 }
-                cb.refer.style.display = 'none';
-              }
-              done++;
-              updateProgress(done, total);
-            }).catch(function(e) {
-              log('delete failed for', cb.name, ':', e);
-              done++;
-              updateProgress(done, total);
-            })
-          );
+                done++;
+                updateProgress(done, total);
+              }).catch(function(e) {
+                log('delete failed for', cb.name, ':', e);
+                done++;
+                updateProgress(done, total);
+              })
+            );
+          })(checked[i]);
         }
+        log('all', promises.length, 'fetch promises created, waiting...');
         var results = await Promise.allSettled(promises);
         var succeeded = 0;
         for (var r = 0; r < results.length; r++) {
+          log('promise result', r, ':', results[r].status);
           if (results[r].status === 'fulfilled') succeeded++;
         }
-        log('all deletions complete:', succeeded, 'succeeded');
+        log('all deletions complete:', succeeded, 'succeeded out of', results.length);
         await new Promise(function(r) { setTimeout(r, 400); });
         hideProgress();
       })();
