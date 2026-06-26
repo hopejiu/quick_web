@@ -15,20 +15,45 @@ export class Data {
      * @param {Partial<Data>} [$$source = {}] - The source object to create the Data.
      */
     constructor($$source = {}) {
-        if (!("hotkey" in $$source)) {
+        if (!("entries" in $$source)) {
             /**
-             * "Alt+E"
+             * 站点条目列表
              * @member
-             * @type {string}
+             * @type {SiteEntry[]}
              */
-            this["hotkey"] = "";
+            this["entries"] = [];
         }
         if (!("auto_start" in $$source)) {
             /**
+             * 开机自启
              * @member
              * @type {boolean}
              */
             this["auto_start"] = false;
+        }
+        if (!("start_minimized" in $$source)) {
+            /**
+             * 启动时最小化
+             * @member
+             * @type {boolean}
+             */
+            this["start_minimized"] = false;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * 是否已释放内置脚本
+             * @member
+             * @type {boolean | undefined}
+             */
+            this["scripts_released"] = undefined;
+        }
+        if (/** @type {any} */(false)) {
+            /**
+             * 旧版兼容字段（迁移用，新设置不再写入）
+             * @member
+             * @type {string | undefined}
+             */
+            this["hotkey"] = undefined;
         }
 
         Object.assign(this, $$source);
@@ -40,7 +65,79 @@ export class Data {
      * @returns {Data}
      */
     static createFrom($$source = {}) {
+        const $$createField0_0 = $$createType1;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("entries" in $$parsedSource) {
+            $$parsedSource["entries"] = $$createField0_0($$parsedSource["entries"]);
+        }
         return new Data(/** @type {Partial<Data>} */($$parsedSource));
     }
 }
+
+/**
+ * SiteEntry 站点配置条目
+ */
+export class SiteEntry {
+    /**
+     * Creates a new SiteEntry instance.
+     * @param {Partial<SiteEntry>} [$$source = {}] - The source object to create the SiteEntry.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * 唯一标识
+             * @member
+             * @type {string}
+             */
+            this["id"] = "";
+        }
+        if (!("url" in $$source)) {
+            /**
+             * 网址
+             * @member
+             * @type {string}
+             */
+            this["url"] = "";
+        }
+        if (!("name" in $$source)) {
+            /**
+             * 显示名称
+             * @member
+             * @type {string}
+             */
+            this["name"] = "";
+        }
+        if (!("hotkey" in $$source)) {
+            /**
+             * 快捷键，如 "Alt+1"
+             * @member
+             * @type {string}
+             */
+            this["hotkey"] = "";
+        }
+        if (!("script_dir" in $$source)) {
+            /**
+             * 脚本目录名（相对路径）
+             * @member
+             * @type {string}
+             */
+            this["script_dir"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new SiteEntry instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {SiteEntry}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new SiteEntry(/** @type {Partial<SiteEntry>} */($$parsedSource));
+    }
+}
+
+// Private type creation functions
+const $$createType0 = SiteEntry.createFrom;
+const $$createType1 = $Create.Array($$createType0);

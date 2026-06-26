@@ -2,12 +2,13 @@ package main
 
 import (
 	"embed"
-	"log"
+	"log/slog"
 	"os"
-	"time"
 
+	applog "changeme/internal/log"
+	"changeme/internal/coordinator"
 	"changeme/internal/hotkey"
-	"changeme/internal/injector"
+	"changeme/internal/scripts"
 	"changeme/internal/settings"
 	"changeme/internal/webview"
 
@@ -17,29 +18,45 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-//go:embed scripts/batch-delete.js
-var batchDeleteJS string
-
-//go:embed scripts/focus-textarea.js
-var focusTextareaJS string
-
-func init() {
-	application.RegisterEvent[string]("app:event")
-}
+//go:embed scripts/*.js
+var embeddedScripts embed.FS
 
 func main() {
-	// ---- 设置 ----
-	cfgDir, err := settings.ConfigDir()
-	if err != nil {
-		log.Fatal(err)
+	// ---- 日志：按小时轮转 + 72 小时保留 ----
+	cfgDir, _ := settings.ConfigDir()
+	if cfgDir == "" {
+		cfgDir, _ = os.Getwd()
 	}
+	if err := applog.Init(cfgDir); err != nil {
+		slog.Error("init logging failed", "error", err)
+	}
+	slog.Info("app started", "cfg_dir", cfgDir)
+
+	// ---- 设置 ----
 	sett := settings.NewService(cfgDir)
 	if err := sett.Load(); err != nil {
-		log.Printf("warn: load settings: %v", err)
+		slog.Warn("load settings failed", "error", err)
+	}
+
+	// ---- 首次释放内置脚本 ----
+	initialSettings := sett.GetSettings()
+	slog.Info("settings loaded", "entries", len(initialSettings.Entries), "scripts_released", initialSettings.ScriptsReleased)
+	for i, e := range initialSettings.Entries {
+		slog.Info("entry", "index", i, "id", e.ID, "url", e.URL, "hotkey", e.Hotkey, "script_dir", e.ScriptDir)
+	}
+	if !initialSettings.ScriptsReleased && len(initialSettings.Entries) > 0 {
+		firstDir := sett.ScriptDir(initialSettings.Entries[0].ScriptDir)
+		slog.Info("releasing embedded scripts", "dir", firstDir)
+		if err := scripts.ReleaseEmbedded(firstDir, embeddedScripts); err != nil {
+			slog.Warn("release embedded scripts failed", "error", err)
+		} else {
+			_ = sett.MarkScriptsReleased()
+			slog.Info("scripts released", "dir", firstDir)
+		}
 	}
 
 	// ---- 应用 ----
-	var wm *webview.Manager // 单例回调中要用到，预先声明
+	var wm *webview.Manager
 
 	app := application.New(application.Options{
 		Name: "DeepSeek",
@@ -52,7 +69,7 @@ func main() {
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "com.deepseek.desktop",
 			OnSecondInstanceLaunch: func(_ application.SecondInstanceData) {
-				wm.Show() // 会重建窗口 + 强制前置
+				wm.Show()
 			},
 		},
 	})
@@ -60,14 +77,53 @@ func main() {
 	// ---- WebView 管理器 ----
 	wm = webview.New(app)
 
-	// 注册脚本注入：每次新窗口创建后定时注入
-	scriptInjector := injector.New(5, time.Second)
-	scriptInjector.Register(injector.Script{Name: "batch-delete", Content: batchDeleteJS})
-	wm.OnAfterCreate(func(win application.Window) {
-		scriptInjector.InjectInto(win)
+	// ---- 热键服务 ----
+	hkSvc := hotkey.NewService()
+
+	// ---- 协调器 ----
+	var coord *coordinator.Service
+	focusJS := readFocusTextareaJS()
+	onShow := func(entryID string, win application.Window) {
+		scriptDir := sett.ScriptDir(
+			getEntryScriptDir(initialSettings.Entries, entryID),
+		)
+		coord.InjectScripts(entryID, scriptDir, win)
+		coord.InjectFocusScript(focusJS, win)
+	}
+	coord = coordinator.New(hkSvc, wm, sett, onShow)
+
+	// 注册初始热键
+	for _, entry := range initialSettings.Entries {
+		if entry.ID == "default" {
+			coord.RegisterEntry(entry, func() {
+				if wm.IsVisible() {
+					wm.Hide()
+				} else {
+					wm.Show()
+				}
+			})
+		} else {
+			coord.RegisterEntry(entry, nil)
+		}
+	}
+
+	// SaveSettings 后同步热键和窗口
+	sett.OnSave(func(old, new settings.Data) {
+		coord.SyncEntries(old, new)
 	})
 
-	wm.Show()
+	// ---- 主窗口 ----
+	if !sett.GetSettings().StartMinimized {
+		wm.Show()
+		slog.Info("main window shown", "has_window", wm.Window() != nil)
+		if len(initialSettings.Entries) > 0 {
+			first := initialSettings.Entries[0]
+			scriptDir := sett.ScriptDir(first.ScriptDir)
+			slog.Info("injecting scripts into main window", "entry", first.ID, "dir", scriptDir)
+			coord.InjectScripts(first.ID, scriptDir, wm.Window())
+			coord.InjectFocusScript(focusJS, wm.Window())
+		}
+	}
 
 	// ---- 设置窗口 ----
 	settingsWindow := app.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -99,49 +155,33 @@ func main() {
 	tray.SetMenu(trayMenu.Menu)
 	tray.OnClick(func() { wm.Show() })
 
-	// ---- 全局热键 ----
-	hkSvc := hotkey.NewService()
-	setupHotkey(hkSvc, wm, sett)
-
 	// ---- 开机自启 ----
 	if sett.GetSettings().AutoStart {
 		if err := app.Autostart.Enable(); err != nil {
-			log.Printf("warn: autostart enable failed: %v", err)
+			slog.Warn("autostart enable failed", "error", err)
 		}
 	}
 
 	if err := app.Run(); err != nil {
-		log.Fatal(err)
+		slog.Error("app run failed", "error", err)
+		os.Exit(1)
 	}
 }
 
-func setupHotkey(hkSvc *hotkey.Service, handler webview.ToggleHandler, sett *settings.Service) {
-	toggle := func() {
-		if handler.IsVisible() {
-			handler.Hide()
-			return
-		}
-		handler.Show()
-		time.Sleep(500 * time.Millisecond)
-		if wm, ok := handler.(*webview.Manager); ok {
-			if win := wm.Window(); win != nil {
-				win.ExecJS(focusTextareaJS)
-			}
+func readFocusTextareaJS() string {
+	data, err := embeddedScripts.ReadFile("scripts/focus-textarea.js")
+	if err != nil {
+		slog.Warn("read focus-textarea.js failed", "error", err)
+		return ""
+	}
+	return string(data)
+}
+
+func getEntryScriptDir(entries []settings.SiteEntry, entryID string) string {
+	for _, e := range entries {
+		if e.ID == entryID {
+			return e.ScriptDir
 		}
 	}
-
-	hk := sett.GetSettings().Hotkey
-	if hk != "" {
-		if err := hkSvc.Register(hk, toggle); err != nil {
-			log.Printf("warn: hotkey register failed: %v", err)
-		}
-	}
-
-	sett.OnHotkeyChange(func(old, new string) error {
-		if new == "" {
-			hkSvc.Unregister()
-			return nil
-		}
-		return hkSvc.RegisterAndSwap(new, toggle)
-	})
+	return ""
 }

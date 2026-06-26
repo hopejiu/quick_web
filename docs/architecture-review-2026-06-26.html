@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Architecture Review — deepseek-pc</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:'default', securityLevel:'loose'});</script>
+<style>
+  :root { --bg:#f8fafc; --surface:#fff; --border:#e2e8f0; --text:#0f172a; --muted:#64748b; --primary:#3b82f6; --danger:#ef4444; --success:#22c55e; --warn:#f59e0b; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; margin:0; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px; margin-bottom:24px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  .badge { display:inline-block; padding:2px 10px; border-radius:9999px; font-size:12px; font-weight:600; }
+  .badge-strong { background:#fef2f2; color:#dc2626; }
+  .badge-worth { background:#fffbeb; color:#d97706; }
+  .badge-speculative { background:#f0f9ff; color:#2563eb; }
+  .badge-dead { background:#f1f5f9; color:#64748b; }
+  pre { background:#1e293b; color:#e2e8f0; padding:16px; border-radius:8px; overflow-x:auto; font-size:13px; line-height:1.6; }
+  code { font-family:"SF Mono","Cascadia Code","Consolas",monospace; }
+  .file-tag { display:inline-block; background:#f1f5f9; color:#475569; padding:2px 8px; border-radius:4px; font-size:12px; font-family:monospace; margin:2px; }
+  .mermaid { text-align:center; margin:16px 0; }
+  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media(max-width:768px){ .grid-2{grid-template-columns:1fr;} }
+  .section-title { font-size:20px; font-weight:700; margin-bottom:8px; }
+  .section-desc { color:var(--muted); font-size:14px; margin-bottom:20px; }
+  .callout { border-left:4px solid var(--warn); background:#fffbeb; padding:12px 16px; border-radius:0 8px 8px 0; margin:12px 0; font-size:13px; }
+  .callout-danger { border-color:var(--danger); background:#fef2f2; }
+  .problem-list { list-style:disc; padding-left:20px; }
+  .problem-list li { margin-bottom:6px; font-size:14px; }
+  .top-pick { border:2px solid var(--primary); background:#eff6ff; }
+</style>
+</head>
+<body class="max-w-4xl mx-auto px-6 py-10">
+
+<h1 class="text-3xl font-bold mb-2">🏗️ Architecture Review</h1>
+<p class="text-sm text-slate-500 mb-8">deepseek-pc — 2026-06-26 · 基于 CONTEXT.md 和 ADR-0001</p>
+
+<!-- ==================== C1: main.go 协调器 ==================== -->
+<div class="card">
+  <div class="flex items-center gap-3 mb-4">
+    <span class="badge badge-strong">Strong</span>
+    <h2 class="text-lg font-bold">C1: 提取 SiteCoordinator — main.go 职责过载</h2>
+  </div>
+
+  <div class="mb-3">
+    <span class="file-tag">main.go</span>
+    <span class="file-tag">internal/hotkey/hotkey.go</span>
+    <span class="file-tag">internal/webview/manager.go</span>
+    <span class="file-tag">internal/scripts/loader.go</span>
+  </div>
+
+  <h3 class="font-semibold text-sm text-red-600 mb-2">问题</h3>
+  <ul class="problem-list mb-4">
+    <li><code>main.go</code> 包含热键注册逻辑 (<code>registerEntryHotkey</code>)、OnSave 回调中的 diff 算法、脚本注入调度 — 这些都是<strong>业务逻辑</strong>，不是单纯的编排</li>
+    <li>OnSave 回调的 diff 逻辑（遍历旧 entries → 注销热键 → 遍历新 entries → 注册热键 → 销毁已删窗口）约 30 行，硬编码在 main 中无法测试</li>
+    <li>热键回调中混合了窗口显示、脚本加载、ExecJS 注入三个关注点</li>
+    <li>违反 ADR-0001 声明的"<code>main.go — 仅编排，不包含业务逻辑实现</code>"</li>
+  </ul>
+
+  <h3 class="font-semibold text-sm text-green-700 mb-2">解决方案</h3>
+  <p class="text-sm mb-4">提取 <code>internal/coordinator/Service</code>，将站点生命周期管理（热键注册/注销 + 窗口管理 + 脚本注入）封装为一个深模块。main.go 只负责创建服务并调用 <code>coordinator.SyncEntries(old, new)</code>。</p>
+
+  <div class="grid-2">
+    <div>
+      <h4 class="text-xs font-semibold text-slate-500 mb-2 uppercase">Before — main.go 承担一切</h4>
+      <div class="mermaid">
+graph TD
+  A[main.go] --> B[hotkey.Register]
+  A --> C[wm.SiteShow]
+  A --> D[scripts.LoadFromDir]
+  A --> E[win.ExecJS]
+  A --> F[OnSave diff逻辑]
+  F --> B
+  F --> C
+  style A fill:#fecaca,stroke:#dc2626
+      </div>
+    </div>
+    <div>
+      <h4 class="text-xs font-semibold text-slate-500 mb-2 uppercase">After — SiteCoordinator 深模块</h4>
+      <div class="mermaid">
+graph TD
+  A[main.go] --> S[coordinator.Service]
+  S --> H[hotkey.Service]
+  S --> W[webview.Manager]
+  S --> L[scripts.Loader]
+  A -->|OnSave| S
+  style S fill:#bbf7b0,stroke:#16a34a
+      </div>
+    </div>
+  </div>
+
+  <h3 class="font-semibold text-sm text-blue-700 mb-2">收益</h3>
+  <ul class="problem-list">
+    <li><strong>可测试性</strong>：SyncEntries 可以用 mock hotkey/webview 做单元测试</li>
+    <li><strong>局部性</strong>：热键 + 窗口 + 脚本的协调逻辑集中在一个模块</li>
+    <li><strong>接口深度</strong>：调用者只需关心 <code>SyncEntries(old, new)</code> 一个方法</li>
+  </ul>
+</div>
+
+<!-- ==================== C2: hotkey goroutine 泄漏 ==================== -->
+<div class="card">
+  <div class="flex items-center gap-3 mb-4">
+    <span class="badge badge-strong">Strong</span>
+    <h2 class="text-lg font-bold">C2: hotkey.Service — goroutine 泄漏</h2>
+  </div>
+
+  <div class="mb-3">
+    <span class="file-tag">internal/hotkey/hotkey.go</span>
+  </div>
+
+  <div class="callout-danger callout">
+    <strong>Bug:</strong> <code>Register()</code> 启动 <code>go func() { for range nhk.Keydown() { ... } }()</code>，但 <code>Unregister()</code> 只调用 <code>hk.Unregister()</code>，不会 close channel，goroutine 永远阻塞。
+  </div>
+
+  <h3 class="font-semibold text-sm text-red-600 mb-2">问题</h3>
+  <pre><code>// Register 中的 goroutine
+go func() {
+    for range nhk.Keydown() {  // ← channel 永远不会 close
+        callback()
+    }
+}()
+
+// Unregister 只注销热键，不通知 goroutine 退出
+func (s *Service) Unregister(keystr string) {
+    hk.Unregister()  // ← goroutine 继续阻塞在 Keydown()
+}</code></pre>
+
+  <h3 class="font-semibold text-sm text-green-700 mb-2">解决方案</h3>
+  <p class="text-sm mb-2">用 <code>context.WithCancel</code> 控制 goroutine 生命周期：</p>
+  <pre><code>type entry struct {
+    hk   *hotkey.Hotkey
+    stop context.CancelFunc
+}
+
+func (s *Service) Register(keystr string, callback func()) error {
+    ctx, cancel := context.WithCancel(context.Background())
+    // ...
+    s.entries[keystr] = &entry{hk: nhk, stop: cancel}
+    go func() {
+        for {
+            select {
+            case &lt;-ctx.Done():
+                return
+            case &lt;-nhk.Keydown():
+                callback()
+            }
+        }
+    }()
+}
+
+func (s *Service) Unregister(keystr string) {
+    if e, ok := s.entries[keystr]; ok {
+        e.stop()          // ← 通知 goroutine 退出
+        e.hk.Unregister()
+        delete(s.entries, keystr)
+    }
+}</code></pre>
+
+  <h3 class="font-semibold text-sm text-blue-700 mb-2">收益</h3>
+  <ul class="problem-list">
+    <li><strong>正确性</strong>：修复实际的 goroutine 泄漏</li>
+    <li><strong>可测试性</strong>：context 控制让 goroutine 生命周期可验证</li>
+  </ul>
+</div>
+
+<!-- ==================== C3: 死代码清理 ==================== -->
+<div class="card">
+  <div class="flex items-center gap-3 mb-4">
+    <span class="badge badge-worth">Worth exploring</span>
+    <h2 class="text-lg font-bold">C3: 清理死代码 — 5 处遗留</h2>
+  </div>
+
+  <div class="mb-3">
+    <span class="file-tag">internal/injector/</span>
+    <span class="file-tag">internal/hotkey/hotkey.go</span>
+    <span class="file-tag">internal/webview/manager.go</span>
+    <span class="file-tag">main.go</span>
+  </div>
+
+  <table class="w-full text-sm mb-4">
+    <thead><tr class="border-b"><th class="text-left py-2">死代码</th><th class="text-left py-2">位置</th><th class="text-left py-2">说明</th></tr></thead>
+    <tbody>
+      <tr class="border-b"><td class="py-2"><code>internal/injector/</code></td><td>整个包</td><td>main.go 未导入，脚本注入已改为直接 ExecJS</td></tr>
+      <tr class="border-b"><td class="py-2"><code>ToggleHandler</code></td><td>webview/manager.go</td><td>接口定义了但未被实现或使用</td></tr>
+      <tr class="border-b"><td class="py-2"><code>OnAfterCreate()</code></td><td>webview/manager.go</td><td>注册回调但 main.go 中从未调用</td></tr>
+      <tr class="border-b"><td class="py-2"><code>RegisterAndSwap()</code></td><td>hotkey/hotkey.go</td><td>方法存在但未被调用</td></tr>
+      <tr class="border-b"><td class="py-2"><code>RegisterEvent[string]</code></td><td>main.go init()</td><td>注册事件但从未触发或监听</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="font-semibold text-sm text-green-700 mb-2">解决方案</h3>
+  <p class="text-sm">直接删除。这些代码可以在 git 历史中恢复。删除后减少认知负担和维护成本。</p>
+
+  <h3 class="font-semibold text-sm text-blue-700 mb-2">收益</h3>
+  <ul class="problem-list">
+    <li><strong>AI-navigability</strong>：减少 5 处误导性代码，AI 不再被未使用的接口迷惑</li>
+    <li><strong>维护成本</strong>：减少约 100 行需要理解和维护的代码</li>
+  </ul>
+</div>
+
+<!-- ==================== C4: 窗口创建重复代码 ==================== -->
+<div class="card">
+  <div class="flex items-center gap-3 mb-4">
+    <span class="badge badge-worth">Worth exploring</span>
+    <h2 class="text-lg font-bold">C4: newWindow / newSiteWindow — 代码重复</h2>
+  </div>
+
+  <div class="mb-3">
+    <span class="file-tag">internal/webview/manager.go</span>
+  </div>
+
+  <h3 class="font-semibold text-sm text-red-600 mb-2">问题</h3>
+  <p class="text-sm mb-2"><code>newWindow()</code> 和 <code>newSiteWindow()</code> 有 25+ 行几乎相同的代码（窗口选项、事件绑定、DevTools 快捷键），仅 Name 前缀不同。</p>
+
+  <div class="grid-2">
+    <div>
+      <h4 class="text-xs font-semibold text-slate-500 mb-2 uppercase">Before — 两个重复方法</h4>
+      <pre><code>// 主窗口
+func (m *Manager) newWindow(...) {
+    w := m.app.Window.NewWithOptions(
+      WebviewWindowOptions{
+        Name: "main",
+        // 20 行相同配置
+      })
+    // 10 行事件绑定
+}
+
+// 站点窗口
+func (m *Manager) newSiteWindow(...) {
+    w := m.app.Window.NewWithOptions(
+      WebviewWindowOptions{
+        Name: "site-"+id,
+        // 20 行相同配置
+      })
+    // 10 行事件绑定
+}</code></pre>
+    </div>
+    <div>
+      <h4 class="text-xs font-semibold text-slate-500 mb-2 uppercase">After — 统一方法</h4>
+      <pre><code>type windowConfig struct {
+    Name   string
+    URL    string
+    Title  string
+    Width  int
+    Height int
+    OnClose func()
+    OnMinimize func()
+}
+
+func (m *Manager) createWindow(cfg windowConfig) application.Window {
+    w := m.app.Window.NewWithOptions(
+      WebviewWindowOptions{
+        Name: cfg.Name,
+        // 一份配置
+      })
+    // 一份事件绑定
+    return w
+}</code></pre>
+    </div>
+  </div>
+
+  <h3 class="font-semibold text-sm text-blue-700 mb-2">收益</h3>
+  <ul class="problem-list">
+    <li><strong>局部性</strong>：窗口创建逻辑集中在一处，修改只需改一次</li>
+    <li><strong>可扩展性</strong>：未来添加新窗口类型只需传不同 config</li>
+  </ul>
+</div>
+
+<!-- ==================== C5: 脚本注入时机 ==================== -->
+<div class="card">
+  <div class="flex items-center gap-3 mb-4">
+    <span class="badge badge-worth">Worth exploring</span>
+    <h2 class="text-lg font-bold">C5: 脚本注入依赖 time.Sleep — 不可靠</h2>
+  </div>
+
+  <div class="mb-3">
+    <span class="file-tag">main.go</span>
+  </div>
+
+  <h3 class="font-semibold text-sm text-red-600 mb-2">问题</h3>
+  <pre><code>// 主窗口脚本注入
+go func() {
+    time.Sleep(600 * time.Millisecond)  // ← 硬编码延时
+    scriptDir := sett.ScriptDir(initialSettings.Entries[0].ScriptDir)
+    if siteScripts, _ := scripts.LoadFromDir(scriptDir); err == nil {
+        for _, js := range siteScripts {
+            win.ExecJS(js)  // ← 页面可能还没加载完
+        }
+    }
+}()</code></pre>
+
+  <p class="text-sm mb-4">600ms 是经验值，网络慢时页面可能未加载完，脚本执行失败。网络快时浪费 600ms。</p>
+
+  <h3 class="font-semibold text-sm text-green-700 mb-2">解决方案</h3>
+  <p class="text-sm mb-2">Wails v3 的 <code>Window.HandleMessage("wails:runtime:ready")</code> 已经注册了 runtime ready 事件。可以扩展为通用的 "页面就绪" 信号：</p>
+  <pre><code>// 方案 A：使用 Wails 的 WindowEvents.Common.WebViewDidFinishNavigation
+w.OnWindowEvent(events.Common.WebViewDidFinishNavigation, func(e *application.WindowEvent) {
+    // 页面加载完成，注入脚本
+})
+
+// 方案 B：保留重试机制，但由 injector 检测注入结果
+// ExecJS 返回 error 可以判断是否成功</code></pre>
+
+  <h3 class="font-semibold text-sm text-blue-700 mb-2">收益</h3>
+  <ul class="problem-list">
+    <li><strong>可靠性</strong>：脚本在页面真正就绪后注入，不再依赖延时</li>
+    <li><strong>响应速度</strong>：快网络下立即注入，不再等待 600ms</li>
+  </ul>
+</div>
+
+<!-- ==================== C6: settings.Save 锁语义 ==================== -->
+<div class="card">
+  <div class="flex items-center gap-3 mb-4">
+    <span class="badge badge-speculative">Speculative</span>
+    <h2 class="text-lg font-bold">C6: settings.Save — 锁语义不清</h2>
+  </div>
+
+  <div class="mb-3">
+    <span class="file-tag">internal/settings/service.go</span>
+  </div>
+
+  <h3 class="font-semibold text-sm text-red-600 mb-2">问题</h3>
+  <pre><code>func (s *Service) Save() error {
+    s.mu.RLock()           // ← 读锁
+    defer s.mu.RUnlock()
+    return s.saveLocked()  // ← 但内部写磁盘
+}
+
+func (s *Service) saveLocked() error {
+    data, _ := json.MarshalIndent(s.data, ...)  // 读 s.data — OK
+    os.WriteFile(s.path, data, 0600)            // 写磁盘 — 但持的是读锁
+}</code></pre>
+  <p class="text-sm mb-4"><code>json.MarshalIndent</code> 只读 <code>s.data</code>，用 RLock 合理。<code>os.WriteFile</code> 写的是外部文件（非共享内存），不涉及 <code>s.data</code>。所以<strong>功能正确</strong>，但语义容易引起误解。</p>
+
+  <h3 class="font-semibold text-sm text-green-700 mb-2">解决方案</h3>
+  <p class="text-sm">重命名为 <code>SaveSnapshot()</code> 或在注释中明确说明 RLock 的合理性：锁只保护 <code>s.data</code> 的读取，磁盘写入不需要锁保护。</p>
+
+  <h3 class="font-semibold text-sm text-blue-700 mb-2">收益</h3>
+  <ul class="problem-list">
+    <li><strong>可读性</strong>：消除代码审查时的疑问</li>
+  </ul>
+</div>
+
+<!-- ==================== Top Recommendation ==================== -->
+<div class="card top-pick">
+  <h2 class="text-xl font-bold mb-4">🏆 Top Recommendation</h2>
+
+  <div class="mb-4">
+    <h3 class="font-semibold">首选：C2 修复 goroutine 泄漏</h3>
+    <p class="text-sm text-slate-600">这是<strong>实际 bug</strong>，每次用户修改热键都会泄漏一个 goroutine。修复成本低（约 20 行改动），收益确定。</p>
+  </div>
+
+  <div class="mb-4">
+    <h3 class="font-semibold">次选：C3 清理死代码</h3>
+    <p class="text-sm text-slate-600">纯删除操作，零风险，立即减少认知负担。建议和 C2 一起做。</p>
+  </div>
+
+  <div>
+    <h3 class="font-semibold">第三：C1 提取 SiteCoordinator</h3>
+    <p class="text-sm text-slate-600">收益最大但改动最大。建议在 C2+C3 完成后再做，此时 main.go 会更清晰，提取更容易。</p>
+  </div>
+</div>
+
+<p class="text-center text-sm text-slate-400 mt-8">Generated by improve-codebase-architecture · deepseek-pc</p>
+
+</body>
+</html>

@@ -1,32 +1,47 @@
 package hotkey
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"golang.design/x/hotkey"
 )
 
-// Service 管理系统级全局热键
+type entry struct {
+	hk   *hotkey.Hotkey
+	stop context.CancelFunc
+}
+
+// Service 管理系统级全局热键（支持多个同时注册）
 type Service struct {
-	hk *hotkey.Hotkey
+	entries map[string]*entry
 }
 
 // NewService 创建热键服务
 func NewService() *Service {
-	return &Service{}
+	return &Service{entries: make(map[string]*entry)}
 }
 
-// Register 注册系统级全局热键，格式: "Alt+E", "Ctrl+Shift+A"
+// Register 注册系统级全局热键
 func (s *Service) Register(keystr string, callback func()) error {
+	if keystr == "" {
+		return nil
+	}
 	mods, key, err := parse(keystr)
 	if err != nil {
 		return fmt.Errorf("快捷键格式无效: %w", err)
 	}
 
-	log.Printf("[hotkey] Register %q (mods=%v key=%v)", keystr, mods, key)
+	if e, ok := s.entries[keystr]; ok {
+		e.stop()
+		e.hk.Unregister()
+		delete(s.entries, keystr)
+	}
+
+	slog.Info("hotkey register", "key", keystr, "mods", mods, "keycode", key)
 	nhk := hotkey.New(mods, key)
 	if err := nhk.Register(); err != nil {
 		msg := err.Error()
@@ -36,54 +51,38 @@ func (s *Service) Register(keystr string, callback func()) error {
 		return fmt.Errorf("热键 %s 注册失败: %s", keystr, msg)
 	}
 
-	s.hk = nhk
+	ctx, cancel := context.WithCancel(context.Background())
+	s.entries[keystr] = &entry{hk: nhk, stop: cancel}
 	go func() {
-		for range s.hk.Keydown() {
-			log.Println("[hotkey] Keydown triggered")
-			callback()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-nhk.Keydown():
+				slog.Info("hotkey triggered", "key", keystr)
+				callback()
+			}
 		}
 	}()
 	return nil
 }
 
-// Unregister 注销当前热键
-func (s *Service) Unregister() {
-	if s.hk != nil {
-		s.hk.Unregister()
-		s.hk = nil
+// Unregister 注销指定热键
+func (s *Service) Unregister(keystr string) {
+	if e, ok := s.entries[keystr]; ok {
+		e.stop()
+		e.hk.Unregister()
+		delete(s.entries, keystr)
 	}
 }
 
-// RegisterAndSwap 安全替换热键：先注册新热键，成功后再注销旧热键
-func (s *Service) RegisterAndSwap(keystr string, callback func()) error {
-	mods, key, err := parse(keystr)
-	if err != nil {
-		return fmt.Errorf("快捷键格式无效")
+// UnregisterAll 注销所有热键
+func (s *Service) UnregisterAll() {
+	for k, e := range s.entries {
+		e.stop()
+		e.hk.Unregister()
+		delete(s.entries, k)
 	}
-
-	log.Printf("[hotkey] RegisterAndSwap trying %q (mods=%v key=%v)", keystr, mods, key)
-	nhk := hotkey.New(mods, key)
-	if err := nhk.Register(); err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "already registered") {
-			return fmt.Errorf("热键 %s 已被其他程序占用", keystr)
-		}
-		return fmt.Errorf("热键 %s 注册失败: %s", keystr, msg)
-	}
-
-	// 新热键注册成功，注销旧的
-	if s.hk != nil {
-		s.hk.Unregister()
-	}
-	s.hk = nhk
-
-	go func() {
-		for range s.hk.Keydown() {
-			log.Println("[hotkey] Keydown triggered")
-			callback()
-		}
-	}()
-	return nil
 }
 
 func parse(s string) ([]hotkey.Modifier, hotkey.Key, error) {

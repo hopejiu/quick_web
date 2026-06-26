@@ -20,54 +20,16 @@
     </header>
 
     <main class="content">
-      <!-- 快捷键 -->
+      <!-- 站点管理 -->
       <section class="section">
-        <h2 class="section-title">全局快捷键</h2>
-        <p class="section-desc">呼出/隐藏 DeepSeek 窗口</p>
-        <div class="hotkey-group">
-          <div class="field">
-            <label class="field-label">修饰键</label>
-            <select id="modSelect" class="select">
-              <option value="Alt">Alt</option>
-              <option value="Ctrl">Ctrl</option>
-              <option value="Shift">Shift</option>
-              <option value="Win">Win</option>
-            </select>
+        <div class="section-header">
+          <div>
+            <h2 class="section-title">站点管理</h2>
+            <p class="section-desc">配置网址、快捷键和注入脚本</p>
           </div>
-          <div class="field">
-            <label class="field-label">按键</label>
-            <select id="keySelect" class="select">
-              <option value="">选择按键</option>
-              <optgroup label="字母">
-                <option value="A">A</option><option value="B">B</option><option value="C">C</option>
-                <option value="D">D</option><option value="E">E</option><option value="F">F</option>
-                <option value="G">G</option><option value="H">H</option><option value="I">I</option>
-                <option value="J">J</option><option value="K">K</option><option value="L">L</option>
-                <option value="M">M</option><option value="N">N</option><option value="O">O</option>
-                <option value="P">P</option><option value="Q">Q</option><option value="R">R</option>
-                <option value="S">S</option><option value="T">T</option><option value="U">U</option>
-                <option value="V">V</option><option value="W">W</option><option value="X">X</option>
-                <option value="Y">Y</option><option value="Z">Z</option>
-              </optgroup>
-              <optgroup label="数字">
-                <option value="0">0</option><option value="1">1</option><option value="2">2</option>
-                <option value="3">3</option><option value="4">4</option><option value="5">5</option>
-                <option value="6">6</option><option value="7">7</option><option value="8">8</option>
-                <option value="9">9</option>
-              </optgroup>
-              <optgroup label="功能键">
-                <option value="F1">F1</option><option value="F2">F2</option><option value="F3">F3</option>
-                <option value="F4">F4</option><option value="F5">F5</option><option value="F6">F6</option>
-                <option value="F7">F7</option><option value="F8">F8</option><option value="F9">F9</option>
-                <option value="F10">F10</option><option value="F11">F11</option><option value="F12">F12</option>
-              </optgroup>
-            </select>
-          </div>
-          <div class="hotkey-preview">
-            当前快捷键：<kbd id="hotkeyDisplay">Alt+E</kbd>
-          </div>
-          <div id="hotkeyError" class="error-msg"></div>
+          <button id="addEntryBtn" class="btn btn-primary" style="height:30px;font-size:12px;">+ 添加站点</button>
         </div>
+        <div id="siteList" class="site-list"></div>
       </section>
 
       <!-- 开机自启 -->
@@ -83,7 +45,114 @@
           </label>
         </div>
       </section>
+
+      <!-- 启动时最小化 -->
+      <section class="section">
+        <div class="toggle-row">
+          <div>
+            <h2 class="section-title">启动时最小化</h2>
+            <p class="section-desc">启动后隐藏到系统托盘，不显示主窗口</p>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="startMinimizedToggle"/>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </section>
     </main>
+  </div>
+
+  <!-- 确认弹窗 -->
+  <div id="confirmModal" class="modal-overlay">
+    <div class="modal" style="width:360px;text-align:center;">
+      <div style="font-size:36px;margin-bottom:12px;">⚠️</div>
+      <div id="confirmTitle" style="font-size:15px;font-weight:600;margin-bottom:8px;">确认删除？</div>
+      <div id="confirmDesc" style="font-size:13px;color:var(--text-secondary);margin-bottom:20px;">此操作不可撤销</div>
+      <div class="modal-actions" style="justify-content:center;">
+        <button id="confirmCancelBtn" class="btn btn-secondary">取消</button>
+        <button id="confirmOkBtn" class="btn" style="background:var(--danger);color:#fff;">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 站点编辑弹窗 -->
+  <div id="siteModal" class="modal-overlay">
+    <div class="modal">
+      <div class="modal-title" id="modalTitle">添加站点</div>
+      <div class="modal-form">
+        <div class="field">
+          <label class="field-label">名称</label>
+          <input type="text" id="entryName" class="input" placeholder="DeepSeek Chat" style="width:100%"/>
+        </div>
+        <div class="field">
+          <label class="field-label">网址</label>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <select id="entryProtocol" class="select" style="width:90px;min-width:90px;">
+              <option value="https://">https://</option>
+              <option value="http://">http://</option>
+            </select>
+            <input type="text" id="entryUrl" class="input" placeholder="chat.deepseek.com" style="flex:1;width:auto;"/>
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label">快捷键</label>
+          <div class="hotkey-selector">
+            <div class="field">
+              <label class="field-label">修饰键</label>
+              <div class="hotkey-btn-group" id="modBtns">
+                <button class="hotkey-btn" data-mod="Ctrl">Ctrl</button>
+                <button class="hotkey-btn selected" data-mod="Alt">Alt</button>
+                <button class="hotkey-btn" data-mod="Shift">Shift</button>
+                <button class="hotkey-btn" data-mod="Win">Win</button>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label">按键</label>
+              <select id="entryKeySelect" class="select">
+                <option value="">选择按键</option>
+                <optgroup label="字母">
+                  <option value="A">A</option><option value="B">B</option><option value="C">C</option>
+                  <option value="D">D</option><option value="E">E</option><option value="F">F</option>
+                  <option value="G">G</option><option value="H">H</option><option value="I">I</option>
+                  <option value="J">J</option><option value="K">K</option><option value="L">L</option>
+                  <option value="M">M</option><option value="N">N</option><option value="O">O</option>
+                  <option value="P">P</option><option value="Q">Q</option><option value="R">R</option>
+                  <option value="S">S</option><option value="T">T</option><option value="U">U</option>
+                  <option value="V">V</option><option value="W">W</option><option value="X">X</option>
+                  <option value="Y">Y</option><option value="Z">Z</option>
+                </optgroup>
+                <optgroup label="数字">
+                  <option value="0">0</option><option value="1">1</option><option value="2">2</option>
+                  <option value="3">3</option><option value="4">4</option><option value="5">5</option>
+                  <option value="6">6</option><option value="7">7</option><option value="8">8</option>
+                  <option value="9">9</option>
+                </optgroup>
+                <optgroup label="功能键">
+                  <option value="F1">F1</option><option value="F2">F2</option><option value="F3">F3</option>
+                  <option value="F4">F4</option><option value="F5">F5</option><option value="F6">F6</option>
+                  <option value="F7">F7</option><option value="F8">F8</option><option value="F9">F9</option>
+                  <option value="F10">F10</option><option value="F11">F11</option><option value="F12">F12</option>
+                </optgroup>
+              </select>
+            </div>
+          </div>
+          <div id="hotkeyPreview" class="hotkey-preview">当前：<kbd id="hotkeyDisplay">Alt+E</kbd></div>
+          <div id="hotkeyConflict" class="hotkey-conflict"></div>
+        </div>
+        <div class="field">
+          <label class="field-label">脚本目录</label>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input type="text" id="entryScriptDir" class="input" placeholder="自动解析" style="flex:1;background:#f5f5f7;" readonly/>
+            <button id="openScriptDirBtn" class="icon-btn" title="打开脚本目录" style="font-size:16px;">📁</button>
+          </div>
+          <span style="font-size:11px;color:var(--text-secondary);">由网址自动解析，脚本存放于 %APPDATA%/deepseek-pc/scripts/此目录名/</span>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="cancelEntryBtn" class="btn btn-secondary">取消</button>
+        <button id="saveEntryBtn" class="btn btn-primary">保存</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="/src/main.js"></script>

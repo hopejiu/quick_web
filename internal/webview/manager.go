@@ -1,7 +1,7 @@
 package webview
 
 import (
-	"log"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -11,55 +11,47 @@ import (
 
 const destroyTimeout = 1 * time.Minute
 
-// ToggleHandler 热键回调需要的窗口切换接口
-type ToggleHandler interface {
-	Show()
-	Hide()
-	IsVisible() bool
-}
-
-// Manager 管理主 WebView 窗口的生命周期
+// Manager 管理 WebView 窗口的生命周期
 type Manager struct {
 	win          application.Window
 	destroyTimer *time.Timer
 	forceClose   atomic.Bool
 	app          *application.App
-	afterCreate  []func(application.Window) // 每次新窗口创建后调用
+
+	siteWindows map[string]application.Window
+	siteTimers  map[string]*time.Timer
 }
 
-// New 创建 Manager。窗口在首次调用 Show 时创建。
+// New 创建 Manager
 func New(app *application.App) *Manager {
-	return &Manager{app: app}
+	return &Manager{
+		app:         app,
+		siteWindows: make(map[string]application.Window),
+		siteTimers:  make(map[string]*time.Timer),
+	}
 }
 
-// OnAfterCreate 注册新窗口创建后的回调（如脚本注入）
-func (m *Manager) OnAfterCreate(fn func(application.Window)) {
-	m.afterCreate = append(m.afterCreate, fn)
-}
-
-// Window 返回当前窗口实例（可能为 nil）
+// Window 返回当前主窗口实例
 func (m *Manager) Window() application.Window {
 	return m.win
 }
 
-// Show 显示窗口，必要时创建新窗口。强制带到最前。
+// Show 显示主窗口
 func (m *Manager) Show() {
 	if m.destroyTimer != nil {
 		m.destroyTimer.Stop()
 		m.destroyTimer = nil
 	}
 	if m.win == nil {
-		m.win = m.newWindow()
+		slog.Info("creating main window")
+		m.win = m.createWindow("main", "https://chat.deepseek.com", "DeepSeek", 1200, 800,
+			func() { m.Hide() },
+		)
 	}
-	m.win.Show()
-	m.win.Focus()
-	// 绕过 Windows 前台窗口限制：临时置顶再取消
-	m.win.SetAlwaysOnTop(true)
-	m.win.SetAlwaysOnTop(false)
-	m.win.Focus()
+	m.bringToFront(m.win)
 }
 
-// Hide 隐藏窗口，启动销毁定时器
+// Hide 隐藏主窗口
 func (m *Manager) Hide() {
 	if m.win == nil {
 		return
@@ -68,20 +60,98 @@ func (m *Manager) Hide() {
 	m.startDestroyTimer()
 }
 
-// IsVisible 返回窗口当前是否可见
+// IsVisible 返回主窗口是否可见
 func (m *Manager) IsVisible() bool {
 	return m.win != nil && m.win.IsVisible()
 }
 
-// ForceClose 销毁旧窗口（用于定时器超时后的重建）
-func (m *Manager) ForceClose() {
-	if m.win == nil {
+// SiteShow 显示站点窗口
+func (m *Manager) SiteShow(entryID, url, title string) {
+	if t, ok := m.siteTimers[entryID]; ok {
+		t.Stop()
+		delete(m.siteTimers, entryID)
+	}
+	if _, ok := m.siteWindows[entryID]; !ok {
+		slog.Info("creating site window", "entry", entryID, "url", url)
+		m.siteWindows[entryID] = m.createWindow("site-"+entryID, url, title, 1200, 800,
+			func() { m.SiteHide(entryID) },
+		)
+	}
+	m.bringToFront(m.siteWindows[entryID])
+}
+
+// SiteHide 隐藏站点窗口
+func (m *Manager) SiteHide(entryID string) {
+	w, ok := m.siteWindows[entryID]
+	if !ok {
 		return
 	}
-	m.forceClose.Store(true)
-	m.win.Close()
-	m.forceClose.Store(false)
-	m.win = nil
+	w.Hide()
+	m.startSiteDestroyTimer(entryID)
+}
+
+// SiteIsVisible 站点窗口是否可见
+func (m *Manager) SiteIsVisible(entryID string) bool {
+	w, ok := m.siteWindows[entryID]
+	return ok && w != nil && w.IsVisible()
+}
+
+// SiteWindow 返回站点窗口
+func (m *Manager) SiteWindow(entryID string) application.Window {
+	return m.siteWindows[entryID]
+}
+
+// DestroySiteWindow 销毁站点窗口
+func (m *Manager) DestroySiteWindow(entryID string) {
+	if t, ok := m.siteTimers[entryID]; ok {
+		t.Stop()
+		delete(m.siteTimers, entryID)
+	}
+	if w, ok := m.siteWindows[entryID]; ok {
+		m.forceClose.Store(true)
+		w.Close()
+		m.forceClose.Store(false)
+		delete(m.siteWindows, entryID)
+	}
+}
+
+func (m *Manager) createWindow(name, url, title string, width, height int, onHide func()) application.Window {
+	w := m.app.Window.NewWithOptions(application.WebviewWindowOptions{
+		Name:            name,
+		Title:           title,
+		Width:           width,
+		Height:          height,
+		MinWidth:        800,
+		MinHeight:       600,
+		URL:             url,
+		DevToolsEnabled: true,
+		KeyBindings: map[string]func(window application.Window){
+			"F12": func(w application.Window) {
+				slog.Info("DevTools opened", "window", name)
+				w.OpenDevTools()
+			},
+		},
+	})
+	w.HandleMessage("wails:runtime:ready")
+	w.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		if m.forceClose.Load() {
+			return
+		}
+		onHide()
+		e.Cancel()
+	})
+	w.OnWindowEvent(events.Common.WindowMinimise, func(e *application.WindowEvent) {
+		onHide()
+	})
+	return w
+}
+
+func (m *Manager) bringToFront(w application.Window) {
+	w.Show()
+	w.Focus()
+	w.SetAlwaysOnTop(true)
+	w.SetAlwaysOnTop(false)
+	w.Focus()
 }
 
 func (m *Manager) startDestroyTimer() {
@@ -89,7 +159,7 @@ func (m *Manager) startDestroyTimer() {
 		m.destroyTimer.Stop()
 	}
 	m.destroyTimer = time.AfterFunc(destroyTimeout, func() {
-		log.Println("[webview] destroy timer expired, closing window")
+		slog.Info("destroy timer expired, closing main window")
 		m.forceClose.Store(true)
 		application.InvokeSync(func() {
 			if m.win != nil {
@@ -101,36 +171,20 @@ func (m *Manager) startDestroyTimer() {
 	})
 }
 
-func (m *Manager) newWindow() application.Window {
-	w := m.app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:            "main",
-		Title:           "DeepSeek",
-		Width:           1200,
-		Height:          800,
-		MinWidth:        800,
-		MinHeight:       600,
-		URL:             "https://chat.deepseek.com",
-		DevToolsEnabled: true,
-		KeyBindings: map[string]func(window application.Window){
-			"F12": func(w application.Window) {
-				log.Println("[webview] F12 - opening DevTools")
-				w.OpenDevTools()
-			},
-		},
-	})
-	w.HandleMessage("wails:runtime:ready")
-	w.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
-		if m.forceClose.Load() {
-			return
-		}
-		m.Hide()
-		e.Cancel()
-	})
-	w.OnWindowEvent(events.Common.WindowMinimise, func(e *application.WindowEvent) {
-		m.Hide()
-	})
-	for _, fn := range m.afterCreate {
-		fn(w)
+func (m *Manager) startSiteDestroyTimer(entryID string) {
+	if t, ok := m.siteTimers[entryID]; ok {
+		t.Stop()
 	}
-	return w
+	m.siteTimers[entryID] = time.AfterFunc(destroyTimeout, func() {
+		slog.Info("destroy timer expired, closing site window", "entry", entryID)
+		m.forceClose.Store(true)
+		application.InvokeSync(func() {
+			if w, ok := m.siteWindows[entryID]; ok {
+				w.Close()
+				delete(m.siteWindows, entryID)
+			}
+		})
+		m.forceClose.Store(false)
+		delete(m.siteTimers, entryID)
+	})
 }

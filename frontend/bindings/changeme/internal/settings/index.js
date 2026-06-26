@@ -8,5 +8,6 @@ export {
 };
 
 export {
-    Data
+    Data,
+    SiteEntry
 } from "./models.js";
