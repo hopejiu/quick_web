@@ -1,138 +1,35 @@
-mod logger;
-mod settings;
-
 use std::collections::HashMap;
-use std::fs;
-use std::process::Command;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use log::{info, warn, error};
 use tauri::{
-    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder,
+    ipc::InvokeError,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 
-// ── 全局状态 ──
+mod hotkey;
+mod logger;
+mod settings;
+mod window_manager;
+mod script_injector;
+
+use hotkey::Hotkey;
+use window_manager::WindowManager;
+
+// ── 应用状态 ──
 
 struct AppState {
-    /// 当前设置
     settings: Mutex<settings::Settings>,
-    /// 热键字符串 → entry_id 映射
     hotkey_map: Mutex<HashMap<String, String>>,
-}
-
-// ── 热键字符串解析（与原 deepseek-pc 格式兼容） ──
-
-fn parse_hotkey(s: &str) -> Result<(Modifiers, Code), String> {
-    let parts: Vec<&str> = s.split('+').collect();
-    if parts.len() < 2 {
-        return Err("热键格式无效，需要修饰键+按键".into());
-    }
-    let mut mods = Modifiers::empty();
-    for p in &parts[..parts.len() - 1] {
-        match p.to_lowercase().as_str() {
-            "ctrl" | "control" => mods |= Modifiers::CONTROL,
-            "alt" => mods |= Modifiers::ALT,
-            "shift" => mods |= Modifiers::SHIFT,
-            "win" | "windows" | "cmd" | "super" => mods |= Modifiers::SUPER,
-            _ => return Err(format!("未知修饰键: {}", p)),
-        }
-    }
-    let key_str = parts.last().unwrap().to_uppercase();
-    let code = match key_str.as_str() {
-        "A" => Code::KeyA,
-        "B" => Code::KeyB,
-        "C" => Code::KeyC,
-        "D" => Code::KeyD,
-        "E" => Code::KeyE,
-        "F" => Code::KeyF,
-        "G" => Code::KeyG,
-        "H" => Code::KeyH,
-        "I" => Code::KeyI,
-        "J" => Code::KeyJ,
-        "K" => Code::KeyK,
-        "L" => Code::KeyL,
-        "M" => Code::KeyM,
-        "N" => Code::KeyN,
-        "O" => Code::KeyO,
-        "P" => Code::KeyP,
-        "Q" => Code::KeyQ,
-        "R" => Code::KeyR,
-        "S" => Code::KeyS,
-        "T" => Code::KeyT,
-        "U" => Code::KeyU,
-        "V" => Code::KeyV,
-        "W" => Code::KeyW,
-        "X" => Code::KeyX,
-        "Y" => Code::KeyY,
-        "Z" => Code::KeyZ,
-        "0" => Code::Digit0,
-        "1" => Code::Digit1,
-        "2" => Code::Digit2,
-        "3" => Code::Digit3,
-        "4" => Code::Digit4,
-        "5" => Code::Digit5,
-        "6" => Code::Digit6,
-        "7" => Code::Digit7,
-        "8" => Code::Digit8,
-        "9" => Code::Digit9,
-        "F1" => Code::F1,
-        "F2" => Code::F2,
-        "F3" => Code::F3,
-        "F4" => Code::F4,
-        "F5" => Code::F5,
-        "F6" => Code::F6,
-        "F7" => Code::F7,
-        "F8" => Code::F8,
-        "F9" => Code::F9,
-        "F10" => Code::F10,
-        "F11" => Code::F11,
-        "F12" => Code::F12,
-        _ => return Err(format!("未知按键: {}", key_str)),
-    };
-    Ok((mods, code))
-}
-
-fn shortcut_to_string(mods: Modifiers, code: &Code) -> String {
-    let mut parts = Vec::new();
-    if mods.contains(Modifiers::CONTROL) {
-        parts.push("Ctrl");
-    }
-    if mods.contains(Modifiers::ALT) {
-        parts.push("Alt");
-    }
-    if mods.contains(Modifiers::SHIFT) {
-        parts.push("Shift");
-    }
-    if mods.contains(Modifiers::SUPER) {
-        parts.push("Win");
-    }
-    parts.push(match code {
-        Code::KeyA => "A", Code::KeyB => "B", Code::KeyC => "C",
-        Code::KeyD => "D", Code::KeyE => "E", Code::KeyF => "F",
-        Code::KeyG => "G", Code::KeyH => "H", Code::KeyI => "I",
-        Code::KeyJ => "J", Code::KeyK => "K", Code::KeyL => "L",
-        Code::KeyM => "M", Code::KeyN => "N", Code::KeyO => "O",
-        Code::KeyP => "P", Code::KeyQ => "Q", Code::KeyR => "R",
-        Code::KeyS => "S", Code::KeyT => "T", Code::KeyU => "U",
-        Code::KeyV => "V", Code::KeyW => "W", Code::KeyX => "X",
-        Code::KeyY => "Y", Code::KeyZ => "Z",
-        Code::Digit0 => "0", Code::Digit1 => "1", Code::Digit2 => "2",
-        Code::Digit3 => "3", Code::Digit4 => "4", Code::Digit5 => "5",
-        Code::Digit6 => "6", Code::Digit7 => "7", Code::Digit8 => "8",
-        Code::Digit9 => "9",
-        Code::F1 => "F1", Code::F2 => "F2", Code::F3 => "F3",
-        Code::F4 => "F4", Code::F5 => "F5", Code::F6 => "F6",
-        Code::F7 => "F7", Code::F8 => "F8", Code::F9 => "F9",
-        Code::F10 => "F10", Code::F11 => "F11", Code::F12 => "F12",
-        _ => "?",
-    });
-    parts.join("+")
+    window_manager: WindowManager,
 }
 
 // ── 窗口工具 ──
@@ -143,16 +40,20 @@ fn bring_to_front(window: &tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
-/// 启动窗口销毁定时器（1 分钟后销毁隐藏的窗口）
+/// 启动窗口销毁定时器（5 秒后销毁隐藏的窗口）
+/// 通过事件通知主线程执行 close，避免跨线程操作窗口
 fn start_destroy_timer(app: &AppHandle, label: String) {
     let app = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(60));
-        if let Some(win) = app.get_webview_window(&label) {
-            if !win.is_visible().unwrap_or(false) {
-                info!("destroy timer: closing window {}", label);
-                let _ = win.close();
+        info!("destroy timer started for {} (5s)", label);
+        std::thread::sleep(Duration::from_secs(5));
+        if app.get_webview_window(&label).is_some() {
+            info!("destroy timer fired, emitting close-request for {}", label);
+            if let Err(e) = app.emit("request-close-window", &label) {
+                error!("failed to emit close-request: {}", e);
             }
+        } else {
+            info!("destroy timer: {} already gone", label);
         }
     });
 }
@@ -160,13 +61,12 @@ fn start_destroy_timer(app: &AppHandle, label: String) {
 /// 创建或显示站点窗口
 fn show_site_window(app: &AppHandle, entry: &settings::SiteEntry) -> tauri::WebviewWindow {
     let label = format!("site-{}", entry.id);
-    // 已有窗口 → 置前
     if let Some(win) = app.get_webview_window(&label) {
         bring_to_front(&win);
         return win;
     }
-    // 新建
-    info!("creating site window");
+
+    info!("creating site window for {}", entry.name);
     let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(entry.url.parse().unwrap()))
         .title(&entry.name)
         .inner_size(1200.0, 800.0)
@@ -176,63 +76,46 @@ fn show_site_window(app: &AppHandle, entry: &settings::SiteEntry) -> tauri::Webv
 
     let win_clone = win.clone();
     let app_clone = app.clone();
+    let label_clone = label.clone();
     win.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            let _ = win_clone.hide();
-            start_destroy_timer(&app_clone, label.clone());
+            let should_close = app_clone
+                .state::<AppState>()
+                .window_manager
+                .take_closing(&label_clone);
+
+            if should_close {
+                info!("window {} close requested by timer, allowing destroy", label_clone);
+                // 不调用 prevent_close，让窗口真正关闭
+            } else {
+                info!("window {} close requested by user, hiding instead", label_clone);
+                api.prevent_close();
+                if let Err(e) = win_clone.hide() {
+                    error!("failed to hide window {}: {}", label_clone, e);
+                } else {
+                    start_destroy_timer(&app_clone, label_clone.clone());
+                }
+            }
         }
     });
 
     let _ = win.show();
     let _ = win.set_focus();
 
-    // 调度脚本注入（原 Go 版 goroutine + 3 次重试）
-    schedule_injection(app, entry);
-
+    script_injector::schedule_injection(app, entry);
     win
-}
-
-/// 延迟注入脚本（等待页面加载，最多 3 次重试）
-fn schedule_injection(app: &AppHandle, entry: &settings::SiteEntry) {
-    let label = format!("site-{}", entry.id);
-    let script_dir = settings::script_dir_path(&entry.script_dir);
-    let app = app.clone();
-
-    std::thread::spawn(move || {
-        for i in 0..3 {
-            std::thread::sleep(Duration::from_secs(1));
-            let Some(win) = app.get_webview_window(&label) else {
-                warn!("injection: window {} not found (attempt {})", label, i + 1);
-                continue;
-            };
-            win.eval(FOCUS_TEXTAREA_JS).ok();
-            win.eval(BATCH_DELETE_JS).ok();
-            info!("injected built-in scripts (attempt {})", i + 1);
-            if let Ok(entries) = fs::read_dir(&script_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext == "js") {
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            win.eval(&content).ok();
-                            info!("injected custom script: {}", path.display());
-                        }
-                    }
-                }
-            }
-            info!("script injection done for {}", label);
-            return;
-        }
-        error!("injection: all 3 attempts failed for {}", label);
-    });
 }
 
 /// 隐藏站点窗口
 fn hide_site_window(app: &AppHandle, entry_id: &str) {
     let label = format!("site-{}", entry_id);
     if let Some(win) = app.get_webview_window(&label) {
-        let _ = win.hide();
-        start_destroy_timer(app, label);
+        info!("hiding window {}", label);
+        if let Err(e) = win.hide() {
+            error!("failed to hide window {}: {}", label, e);
+        } else {
+            start_destroy_timer(app, label);
+        }
     }
 }
 
@@ -243,88 +126,60 @@ fn toggle_site_window(app: &AppHandle, entry: &settings::SiteEntry) {
         if win.is_visible().unwrap_or(false) {
             hide_site_window(app, &entry.id);
         } else {
+            info!("showing hidden window {}", label);
             bring_to_front(&win);
         }
     } else {
+        info!("no existing window {}, creating new", label);
         show_site_window(app, entry);
     }
 }
 
-// ── 热键同步 ──
+// ── Raw shortcut → String （global-shortcut 处理器用） ──
 
-/// 重新注册所有热键，返回注册失败的快捷键列表
-fn sync_hotkeys(app: &AppHandle, state: &AppState, new: &settings::Settings) -> Vec<(String, String)> {
-    let mut map = state.hotkey_map.lock().unwrap();
-    let shortcut_manager = app.global_shortcut();
-    let mut failures = Vec::new();
+fn raw_shortcut_to_string(shortcut: &tauri_plugin_global_shortcut::Shortcut) -> String {
+    let hk = Hotkey { mods: shortcut.mods, code: shortcut.key };
+    hk.to_string()
+}
 
-    // 注销所有旧热键
-    for hk in map.keys() {
-        if let Ok((mods, code)) = parse_hotkey(hk) {
-            let _ = shortcut_manager.unregister(Shortcut::new(Some(mods), code.clone()));
-        }
-    }
-    map.clear();
+// ── 结果类型（#2 职责分离） ──
 
-    // 注册所有新热键
-    for entry in &new.entries {
-        if entry.hotkey.is_empty() {
-            continue;
-        }
-        match parse_hotkey(&entry.hotkey) {
-            Ok((mods, code)) => {
-                let shortcut = Shortcut::new(Some(mods), code);
-                if let Err(e) = shortcut_manager.register(shortcut) {
-                    warn!("hotkey register failed: {} ({})", entry.hotkey, e);
-                    failures.push((entry.hotkey.clone(), e.to_string()));
-                } else {
-                    map.insert(entry.hotkey.clone(), entry.id.clone());
-                    info!("hotkey registered: {} → {}", entry.hotkey, entry.name);
-                }
-            }
-            Err(e) => {
-                warn!("invalid hotkey {}: {}", entry.hotkey, e);
-                failures.push((entry.hotkey.clone(), e));
+#[derive(Debug)]
+pub enum SaveError {
+    Io(String),
+    HotkeyFailures(Vec<(String, String)>),
+}
+
+impl fmt::Display for SaveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "保存失败: {}", e),
+            Self::HotkeyFailures(failures) => {
+                let msg = failures.iter().map(|(hk, e)| format!("{}: {}", hk, e)).collect::<Vec<_>>().join("; ");
+                write!(f, "设置已保存，但以下快捷键注册失败: {}", msg)
             }
         }
     }
+}
 
-    failures
+impl From<SaveError> for InvokeError {
+    fn from(e: SaveError) -> Self {
+        InvokeError::from(e.to_string())
+    }
 }
 
 // ── Tauri Commands ──
 
-/// 检查快捷键是否可被注册
-/// 若该快捷键已被当前 entry（editing_id）持有，直接视为可用
 #[tauri::command]
 fn check_hotkey(
     app: AppHandle,
-    hotkey: String,
+    state: tauri::State<AppState>,
+    hotkey_str: String,
     editing_id: Option<String>,
 ) -> Result<(), String> {
-    let state = app.state::<AppState>();
+    let hk = Hotkey::from_str(&hotkey_str).map_err(|e| e.to_string())?;
     let map = state.hotkey_map.lock().unwrap();
-
-    // 如果该快捷键已注册给当前 entry，直接视为可用
-    if let Some(entry_id) = map.get(&hotkey) {
-        return if editing_id.as_ref() == Some(entry_id) {
-            Ok(())
-        } else {
-            Err("已被其他站点占用".into())
-        };
-    }
-    drop(map);
-
-    // 未注册过，临时注册验证系统可用性
-    let shortcut_manager = app.global_shortcut();
-    let (mods, code) = parse_hotkey(&hotkey)?;
-    let shortcut = Shortcut::new(Some(mods), code.clone());
-    if let Err(e) = shortcut_manager.register(shortcut) {
-        return Err(format!("无法注册: {}", e));
-    }
-    // 立即注销，不影响现有状态
-    let _ = shortcut_manager.unregister(Shortcut::new(Some(mods), code));
-    Ok(())
+    hotkey::check_hotkey(app.clone(), &map, &hk, editing_id.as_deref())
 }
 
 #[tauri::command]
@@ -337,14 +192,14 @@ fn save_settings(
     app: AppHandle,
     state: tauri::State<AppState>,
     data: settings::Settings,
-) -> Result<(), String> {
+) -> Result<(), SaveError> {
     let old = {
         let mut s = state.settings.lock().unwrap();
         let old = s.clone();
         *s = data.clone();
         old
     };
-    settings::save(&data)?;
+    settings::save(&data).map_err(SaveError::Io)?;
 
     // Autostart 同步
     let autostart = app.autolaunch();
@@ -354,8 +209,11 @@ fn save_settings(
         let _ = autostart.disable();
     }
 
-    // 热键同步（收集注册失败的快捷键）
-    let failures = sync_hotkeys(&app, &state, &data);
+    // 热键 diff 同步
+    let mut hotkey_map = state.hotkey_map.lock().unwrap();
+    let outcome = hotkey::sync_hotkeys(app.clone(), &mut hotkey_map, &data);
+    let failures = outcome.failures;
+    std::mem::drop(hotkey_map);
 
     // 销毁已删除条目的窗口
     for old_entry in &old.entries {
@@ -370,37 +228,27 @@ fn save_settings(
     app.emit("settings-saved", &data).ok();
     info!("settings saved");
 
-    // 有关键键注册失败则返回错误信息
-    if !failures.is_empty() {
-        let msg = failures
-            .iter()
-            .map(|(hk, err)| format!("{}: {}", hk, err))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(format!("设置已保存，但以下快捷键注册失败: {}", msg));
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(SaveError::HotkeyFailures(failures))
     }
-
-    Ok(())
 }
 
 #[tauri::command]
 fn open_script_dir(dir_name: String) -> Result<(), String> {
     let dir = settings::script_dir_path(&dir_name);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Command::new("explorer").arg(&dir).spawn().map_err(|e| format!("打开目录失败: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer").arg(&dir).spawn().map_err(|e| format!("打开目录失败: {}", e))?;
     Ok(())
 }
 
 #[tauri::command]
 fn toggle_window(app: AppHandle, state: tauri::State<AppState>, entry_id: String) -> Result<(), String> {
     let settings = state.settings.lock().unwrap();
-    let entry = settings
-        .entries
-        .iter()
-        .find(|e| e.id == entry_id)
-        .cloned()
+    let entry = settings.entries.iter().find(|e| e.id == entry_id).cloned()
         .ok_or_else(|| format!("entry not found: {}", entry_id))?;
-    drop(settings);
+    std::mem::drop(settings);
     toggle_site_window(&app, &entry);
     Ok(())
 }
@@ -412,79 +260,26 @@ fn show_settings_window(app: AppHandle) {
     }
 }
 
-// ── 注入脚本 ──
-
-/// 编译时嵌入的内置脚本
-const FOCUS_TEXTAREA_JS: &str = r#"console.log('[inject] focus-textarea.js loaded');var el=document.querySelector('textarea[name="search"]');if(el)el.focus();"#;
-const BATCH_DELETE_JS: &str = include_str!("../../scripts/batch-delete.js");
-
 #[tauri::command]
 fn inject_scripts(app: AppHandle, entry_id: String) -> Result<(), String> {
-    let label = format!("site-{}", entry_id);
-    let win = app
-        .get_webview_window(&label)
-        .ok_or("window not found")?;
-
-    // 先注入 focus-textarea 脚本
-    let _ = win.eval(FOCUS_TEXTAREA_JS);
-
-    // 从磁盘加载自定义脚本
-    let script_dir = {
-        let settings = app.state::<AppState>();
-        let s = settings.settings.lock().unwrap();
-        let entry = s
-            .entries
-            .iter()
-            .find(|e| e.id == entry_id)
-            .cloned();
-        entry.map(|e| settings::script_dir_path(&e.script_dir))
-    };
-    if let Some(dir) = script_dir {
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "js") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        let _ = win.eval(&content);
-                        info!("injected script: {}", path.display());
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
+    script_injector::inject_once(&app, &entry_id)
 }
 
 #[tauri::command]
-fn release_embedded_scripts(_app: AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
-    let scripts_dir = settings::config_dir().join("scripts").join("chat.deepseek.com");
-    if scripts_dir.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(&scripts_dir).map_err(|e| e.to_string())?;
-    // 写入 batch-delete.js
-    fs::write(scripts_dir.join("batch-delete.js"), BATCH_DELETE_JS).map_err(|e| e.to_string())?;
-    fs::write(scripts_dir.join("focus-textarea.js"), FOCUS_TEXTAREA_JS).map_err(|e| e.to_string())?;
-
-    let mut s = state.settings.lock().unwrap();
-    s.scripts_released = true;
-    settings::save(&s)?;
-    info!("embedded scripts released");
-    Ok(())
+fn release_embedded_scripts(app: AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
+    script_injector::release_embedded_scripts(&app, &state)
 }
 
 // ── 应用入口 ──
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // ---- 日志初始化 ----
     let cfg_dir = settings::config_dir();
     let log_dir = cfg_dir.join("logs");
     let dev_mode = cfg!(debug_assertions);
     logger::init(log_dir, dev_mode).ok();
     info!("app started, config dir: {:?}", cfg_dir);
 
-    // ---- 加载设置 ----
     let initial_settings = settings::load();
 
     tauri::Builder::default()
@@ -492,21 +287,16 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
-                    if event.state != ShortcutState::Pressed {
-                        return;
-                    }
-                    let hk_str = shortcut_to_string(
-                        shortcut.mods,
-                        &shortcut.key,
-                    );
+                    if event.state != ShortcutState::Pressed { return; }
+                    let hk_str = raw_shortcut_to_string(shortcut);
                     if let Some(state) = app.try_state::<AppState>() {
                         let map = state.hotkey_map.lock().unwrap();
                         if let Some(entry_id) = map.get(&hk_str) {
                             let entry_id = entry_id.clone();
-                            drop(map);
+                            std::mem::drop(map);
                             let settings = state.settings.lock().unwrap();
                             let entry = settings.entries.iter().find(|e| e.id == entry_id).cloned();
-                            drop(settings);
+                            std::mem::drop(settings);
                             if let Some(e) = entry {
                                 toggle_site_window(app, &e);
                             }
@@ -515,8 +305,29 @@ pub fn run() {
                 })
                 .build(),
         )
-        .setup(|app| {
-            // ---- Autostart ----
+        .setup(move |app| {
+            // 窗口销毁事件监听（定时器到时间后发事件，主线程执行 close）
+            let handle = app.handle().clone();
+            app.listen("request-close-window", move |event| {
+                let label = event.payload().trim_matches('"');
+                info!("received request-close-window for {}", label);
+                if let Some(win) = handle.get_webview_window(label) {
+                    if !win.is_visible().unwrap_or(false) {
+                        info!("marking {} for timer-triggered close", label);
+                        handle.state::<AppState>().window_manager.mark_closing(label);
+                        info!("closing window {} (destroy timer)", label);
+                        if let Err(e) = win.close() {
+                            error!("failed to close window {}: {}", label, e);
+                        }
+                    } else {
+                        info!("window {} is now visible, skip close", label);
+                    }
+                } else {
+                    info!("window {} not found, already closed?", label);
+                }
+            });
+
+            // Autostart
             app.handle().plugin(
                 tauri_plugin_autostart::init(
                     tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -524,26 +335,26 @@ pub fn run() {
                 ),
             )?;
 
-            // ---- 状态 ----
-            let hotkey_map = {
-                let mut map = HashMap::new();
-                for e in &initial_settings.entries {
-                    if !e.hotkey.is_empty() {
-                        map.insert(e.hotkey.clone(), e.id.clone());
-                    }
-                }
-                map
+            // 初始热键注册
+            let mut hotkey_map = HashMap::<String, String>::new();
+            let registration_outcome = {
+                hotkey::sync_hotkeys(app.handle().clone(), &mut hotkey_map, &initial_settings)
             };
-            let state = AppState {
-                settings: Mutex::new(initial_settings),
-                hotkey_map: Mutex::new(hotkey_map),
-            };
-            app.manage(state);
+            if !registration_outcome.failures.is_empty() {
+                warn!("initial hotkey registration failures: {:?}", registration_outcome.failures);
+            }
 
-            // ---- 设置窗口（始终隐藏，通过托盘菜单唤起） ----
+            // 状态
+            let initial_settings_for_state = initial_settings.clone();
+            app.manage(AppState {
+                settings: Mutex::new(initial_settings_for_state),
+                hotkey_map: Mutex::new(hotkey_map),
+                window_manager: WindowManager::new(),
+            });
+
+            // 设置窗口
             let settings_win = WebviewWindowBuilder::new(
-                app,
-                "settings",
+                app, "settings",
                 WebviewUrl::App("index.html".into()),
             )
             .title("设置")
@@ -551,7 +362,6 @@ pub fn run() {
             .min_inner_size(600.0, 400.0)
             .visible(false)
             .build()?;
-            // 窗口关闭 → 隐藏而非退出
             let sw = settings_win.clone();
             settings_win.on_window_event(move |event| {
                 if let WindowEvent::CloseRequested { api, .. } = event {
@@ -560,29 +370,17 @@ pub fn run() {
                 }
             });
 
-            // ---- 注册热键 ----
-            let state_ref = app.state::<AppState>();
-            let init_failures = sync_hotkeys(app.handle(), state_ref.inner(), &state_ref.settings.lock().unwrap().clone());
-            if !init_failures.is_empty() {
-                let msg = init_failures.iter().map(|(hk, err)| format!("{}: {}", hk, err)).collect::<Vec<_>>().join("; ");
-                warn!("initial hotkey registration failures: {}", msg);
-            }
-
-            // ---- 首次释放脚本 ----
-            if !state_ref.settings.lock().unwrap().scripts_released {
-                let scripts_dir = settings::config_dir().join("scripts").join("chat.deepseek.com");
-                fs::create_dir_all(&scripts_dir).ok();
-                fs::write(scripts_dir.join("batch-delete.js"), BATCH_DELETE_JS).ok();
-                fs::write(scripts_dir.join("focus-textarea.js"), FOCUS_TEXTAREA_JS).ok();
+            // 首次释放脚本（flag 提前读取，避免 closure 生命周期问题）
+            let need_release_scripts = !initial_settings.scripts_released;
+            if need_release_scripts {
+                let state_ref = app.state::<AppState>();
+                script_injector::release_embedded_scripts(app.handle(), &state_ref).ok();
                 state_ref.settings.lock().unwrap().scripts_released = true;
                 settings::save(&state_ref.settings.lock().unwrap()).ok();
                 info!("embedded scripts released on first launch");
             }
 
-            // ---- 启动最小化判断 ----
-            let start_minimized = state_ref.settings.lock().unwrap().start_minimized;
-
-            // ---- 系统托盘 ----
+            // 托盘
             let _app_handle = app.handle().clone();
             let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
             let settings_item = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
@@ -595,11 +393,10 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => {
-                        // 显示默认站点窗口
                         let state = app.state::<AppState>();
                         let s = state.settings.lock().unwrap();
                         if let Some(first) = s.entries.first().cloned() {
-                            drop(s);
+                            std::mem::drop(s);
                             toggle_site_window(app, &first);
                         }
                     }
@@ -608,9 +405,7 @@ pub fn run() {
                             bring_to_front(&win);
                         }
                     }
-                    "quit" => {
-                        app.exit(0);
-                    }
+                    "quit" => { app.exit(0); }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -618,20 +413,19 @@ pub fn run() {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
-                    } = event
-                    {
+                    } = event {
                         let app = tray.app_handle();
                         let state = app.state::<AppState>();
                         let s = state.settings.lock().unwrap();
                         if let Some(first) = s.entries.first().cloned() {
-                            drop(s);
+                            std::mem::drop(s);
                             toggle_site_window(&app, &first);
                         }
                     }
                 })
                 .build(app)?;
 
-            // ---- 单实例 ----
+            // 单实例
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
                 info!("second instance detected, bringing windows to front");
@@ -642,11 +436,16 @@ pub fn run() {
                 }
             }))?;
 
-            // ---- 非最小化：显示第一个站点窗口 ----
+            // 非最小化：显示第一个站点窗口
+            let start_minimized = {
+                let s = app.state::<AppState>();
+                let val = s.settings.lock().unwrap().start_minimized;
+                val
+            };
             if !start_minimized {
                 let s = app.state::<AppState>().settings.lock().unwrap().clone();
                 if let Some(first) = s.entries.first().cloned() {
-                    drop(s);
+                    std::mem::drop(s);
                     show_site_window(app.handle(), &first);
                 }
             }

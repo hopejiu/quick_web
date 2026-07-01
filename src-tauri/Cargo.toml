@@ -23,6 +23,11 @@ dirs = "6"
 log = { version = "0.4", features = ["std"] }
 chrono = "0.4"
 
+
+[profile.dev]
+codegen-units = 256
+
+
 [profile.release]
 codegen-units = 1
 lto = true

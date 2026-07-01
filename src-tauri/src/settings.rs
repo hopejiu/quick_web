@@ -1,5 +1,8 @@
+use std::str::FromStr;
 use std::fs;
 use std::path::PathBuf;
+
+use crate::hotkey::Hotkey;
 
 /// 站点配置条目
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -8,8 +11,35 @@ pub struct SiteEntry {
     pub id: String,
     pub url: String,
     pub name: String,
-    pub hotkey: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "hotkey_serde"
+    )]
+    pub hotkey: Option<Hotkey>,
     pub script_dir: String,
+}
+
+/// 自定义 Hotkey 序列化：None → 省略字段；Some(hk) → "Alt+E" 字符串
+mod hotkey_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::str::FromStr;
+    use crate::hotkey::Hotkey;
+
+    pub fn serialize<S: Serializer>(hk: &Option<Hotkey>, s: S) -> Result<S::Ok, S::Error> {
+        match hk {
+            Some(h) => s.serialize_str(&h.to_string()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Hotkey>, D::Error> {
+        let s: Option<String> = Option::deserialize(d)?;
+        match s {
+            Some(s) if !s.is_empty() => Hotkey::from_str(&s).map(Some).map_err(serde::de::Error::custom),
+            _ => Ok(None),
+        }
+    }
 }
 
 /// 应用设置，JSON 字段与原 deepseek-pc 兼容（snake_case）
@@ -33,7 +63,7 @@ impl Default for Settings {
                 id: "default".into(),
                 url: "https://chat.deepseek.com".into(),
                 name: "DeepSeek Chat".into(),
-                hotkey: "Alt+E".into(),
+                hotkey: Some(Hotkey::from_str("Alt+E").expect("default hotkey is valid")),
                 script_dir: "chat.deepseek.com".into(),
             }],
             auto_start: false,
@@ -71,12 +101,14 @@ pub fn load() -> Settings {
             let mut s: Settings = serde_json::from_str(&content).unwrap_or_default();
             // initDefaults：空 entries 时创建默认条目（兼容旧版迁移）
             if s.entries.is_empty() {
-                let old_hk = s.hotkey.take().unwrap_or_else(|| "Alt+E".into());
+                let hk_opt = s.hotkey.take()
+                    .and_then(|h| Hotkey::from_str(&h).ok())
+                        .or_else(|| Hotkey::from_str("Alt+E").ok());
                 s.entries.push(SiteEntry {
                     id: "default".into(),
                     url: "https://chat.deepseek.com".into(),
                     name: "DeepSeek Chat".into(),
-                    hotkey: old_hk,
+                    hotkey: hk_opt,
                     script_dir: "chat.deepseek.com".into(),
                 });
                 s.scripts_released = false;
