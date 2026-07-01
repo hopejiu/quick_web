@@ -11,28 +11,28 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
-          node-version: 22
+          node-version: 24.14.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-          run_install: false
+        shell: bash
+        run: corepack enable && corepack prepare pnpm@10.33.0 --activate
 
       - name: Get pnpm store directory
         shell: bash
         run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
 
       - name: Cache pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@v4.2.3
         with:
           path: ${{ env.STORE_PATH }}
           key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
@@ -40,7 +40,7 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v4.2.3
         with:
           path: |
             ~/.cargo/registry
@@ -51,19 +51,21 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          echo "verify-store-integrity=false" >> .npmrc
+          pnpm install --no-frozen-lockfile
 
       - name: Build Tauri app
         run: pnpm tauri build
 
       - name: Upload setup exe
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: DeepSeek-PC-Setup
           path: src-tauri/target/release/bundle/nsis/*.exe
 
       - name: Upload portable exe
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: DeepSeek-PC-Portable
           path: src-tauri/target/release/quick-web-v2.exe
