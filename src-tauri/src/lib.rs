@@ -4,22 +4,21 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use log::{info, warn, error};
+use log::{error, info, warn};
 use tauri::{
-    AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder,
     ipc::InvokeError,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    WindowEvent,
+    AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::ShortcutState;
 
 mod hotkey;
 mod logger;
+mod script_injector;
 mod settings;
 mod window_manager;
-mod script_injector;
 
 use hotkey::Hotkey;
 use window_manager::WindowManager;
@@ -67,35 +66,55 @@ fn show_site_window(app: &AppHandle, entry: &settings::SiteEntry) -> tauri::Webv
     }
 
     info!("creating site window for {}", entry.name);
-    let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(entry.url.parse().unwrap()))
-        .title(&entry.name)
-        .inner_size(1200.0, 800.0)
-        .min_inner_size(800.0, 600.0)
-        .build()
-        .expect("failed to create site window");
+    let win = WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::External(entry.url.parse().unwrap()),
+    )
+    .title(&entry.name)
+    .inner_size(1200.0, 800.0)
+    .min_inner_size(800.0, 600.0)
+    .build()
+    .expect("failed to create site window");
 
     let win_clone = win.clone();
     let app_clone = app.clone();
     let label_clone = label.clone();
     win.on_window_event(move |event| {
-        if let WindowEvent::CloseRequested { api, .. } = event {
-            let should_close = app_clone
-                .state::<AppState>()
-                .window_manager
-                .take_closing(&label_clone);
+        match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                let should_close = app_clone
+                    .state::<AppState>()
+                    .window_manager
+                    .take_closing(&label_clone);
 
-            if should_close {
-                info!("window {} close requested by timer, allowing destroy", label_clone);
-                // 不调用 prevent_close，让窗口真正关闭
-            } else {
-                info!("window {} close requested by user, hiding instead", label_clone);
-                api.prevent_close();
+                if should_close {
+                    info!(
+                        "window {} close requested by timer, allowing destroy",
+                        label_clone
+                    );
+                } else {
+                    info!(
+                        "window {} close requested by user, hiding instead",
+                        label_clone
+                    );
+                    api.prevent_close();
+                    if let Err(e) = win_clone.hide() {
+                        error!("failed to hide window {}: {}", label_clone, e);
+                    } else {
+                        start_destroy_timer(&app_clone, label_clone.clone());
+                    }
+                }
+            }
+            WindowEvent::Resized(size) if size.width == 0 && size.height == 0 => {
+                info!("window {} minimized, hiding instead", label_clone);
                 if let Err(e) = win_clone.hide() {
                     error!("failed to hide window {}: {}", label_clone, e);
                 } else {
                     start_destroy_timer(&app_clone, label_clone.clone());
                 }
             }
+            _ => {}
         }
     });
 
@@ -138,7 +157,10 @@ fn toggle_site_window(app: &AppHandle, entry: &settings::SiteEntry) {
 // ── Raw shortcut → String （global-shortcut 处理器用） ──
 
 fn raw_shortcut_to_string(shortcut: &tauri_plugin_global_shortcut::Shortcut) -> String {
-    let hk = Hotkey { mods: shortcut.mods, code: shortcut.key };
+    let hk = Hotkey {
+        mods: shortcut.mods,
+        code: shortcut.key,
+    };
     hk.to_string()
 }
 
@@ -155,7 +177,11 @@ impl fmt::Display for SaveError {
         match self {
             Self::Io(e) => write!(f, "保存失败: {}", e),
             Self::HotkeyFailures(failures) => {
-                let msg = failures.iter().map(|(hk, e)| format!("{}: {}", hk, e)).collect::<Vec<_>>().join("; ");
+                let msg = failures
+                    .iter()
+                    .map(|(hk, e)| format!("{}: {}", hk, e))
+                    .collect::<Vec<_>>()
+                    .join("; ");
                 write!(f, "设置已保存，但以下快捷键注册失败: {}", msg)
             }
         }
@@ -239,14 +265,25 @@ fn save_settings(
 fn open_script_dir(dir_name: String) -> Result<(), String> {
     let dir = settings::script_dir_path(&dir_name);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::process::Command::new("explorer").arg(&dir).spawn().map_err(|e| format!("打开目录失败: {}", e))?;
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| format!("打开目录失败: {}", e))?;
     Ok(())
 }
 
 #[tauri::command]
-fn toggle_window(app: AppHandle, state: tauri::State<AppState>, entry_id: String) -> Result<(), String> {
+fn toggle_window(
+    app: AppHandle,
+    state: tauri::State<AppState>,
+    entry_id: String,
+) -> Result<(), String> {
     let settings = state.settings.lock().unwrap();
-    let entry = settings.entries.iter().find(|e| e.id == entry_id).cloned()
+    let entry = settings
+        .entries
+        .iter()
+        .find(|e| e.id == entry_id)
+        .cloned()
         .ok_or_else(|| format!("entry not found: {}", entry_id))?;
     std::mem::drop(settings);
     toggle_site_window(&app, &entry);
@@ -287,7 +324,9 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
-                    if event.state != ShortcutState::Pressed { return; }
+                    if event.state != ShortcutState::Pressed {
+                        return;
+                    }
                     let hk_str = raw_shortcut_to_string(shortcut);
                     if let Some(state) = app.try_state::<AppState>() {
                         let map = state.hotkey_map.lock().unwrap();
@@ -314,7 +353,10 @@ pub fn run() {
                 if let Some(win) = handle.get_webview_window(label) {
                     if !win.is_visible().unwrap_or(false) {
                         info!("marking {} for timer-triggered close", label);
-                        handle.state::<AppState>().window_manager.mark_closing(label);
+                        handle
+                            .state::<AppState>()
+                            .window_manager
+                            .mark_closing(label);
                         info!("closing window {} (destroy timer)", label);
                         if let Err(e) = win.close() {
                             error!("failed to close window {}: {}", label, e);
@@ -328,20 +370,20 @@ pub fn run() {
             });
 
             // Autostart
-            app.handle().plugin(
-                tauri_plugin_autostart::init(
-                    tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-                    None,
-                ),
-            )?;
+            app.handle().plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ))?;
 
             // 初始热键注册
             let mut hotkey_map = HashMap::<String, String>::new();
-            let registration_outcome = {
-                hotkey::sync_hotkeys(app.handle().clone(), &mut hotkey_map, &initial_settings)
-            };
+            let registration_outcome =
+                { hotkey::sync_hotkeys(app.handle().clone(), &mut hotkey_map, &initial_settings) };
             if !registration_outcome.failures.is_empty() {
-                warn!("initial hotkey registration failures: {:?}", registration_outcome.failures);
+                warn!(
+                    "initial hotkey registration failures: {:?}",
+                    registration_outcome.failures
+                );
             }
 
             // 状态
@@ -353,21 +395,24 @@ pub fn run() {
             });
 
             // 设置窗口
-            let settings_win = WebviewWindowBuilder::new(
-                app, "settings",
-                WebviewUrl::App("index.html".into()),
-            )
-            .title("设置")
-            .inner_size(700.0, 620.0)
-            .min_inner_size(600.0, 400.0)
-            .visible(false)
-            .build()?;
+            let settings_win =
+                WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+                    .title("设置")
+                    .inner_size(700.0, 620.0)
+                    .min_inner_size(600.0, 400.0)
+                    .visible(false)
+                    .build()?;
             let sw = settings_win.clone();
-            settings_win.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { api, .. } = event {
+            settings_win.on_window_event(move |event| match event {
+                WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = sw.hide();
                 }
+                WindowEvent::Resized(size) if size.width == 0 && size.height == 0 => {
+                    info!("settings window minimized, hiding instead");
+                    let _ = sw.hide();
+                }
+                _ => {}
             });
 
             // 首次释放脚本（flag 提前读取，避免 closure 生命周期问题）
@@ -405,7 +450,9 @@ pub fn run() {
                             bring_to_front(&win);
                         }
                     }
-                    "quit" => { app.exit(0); }
+                    "quit" => {
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -413,7 +460,8 @@ pub fn run() {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
-                    } = event {
+                    } = event
+                    {
                         let app = tray.app_handle();
                         let state = app.state::<AppState>();
                         let s = state.settings.lock().unwrap();
@@ -427,14 +475,15 @@ pub fn run() {
 
             // 单实例
             #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-                info!("second instance detected, bringing windows to front");
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.unminimize();
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
-            }))?;
+            app.handle()
+                .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                    info!("second instance detected, bringing windows to front");
+                    if let Some(win) = app.get_webview_window("settings") {
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                }))?;
 
             // 非最小化：显示第一个站点窗口
             let start_minimized = {
