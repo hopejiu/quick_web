@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"golang.design/x/hotkey"
 )
+
+const debounceInterval = 200 * time.Millisecond
 
 type entry struct {
 	hk   *hotkey.Hotkey
@@ -54,11 +57,17 @@ func (s *Service) Register(keystr string, callback func()) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.entries[keystr] = &entry{hk: nhk, stop: cancel}
 	go func() {
+		var lastFire time.Time
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-nhk.Keydown():
+				now := time.Now()
+				if now.Sub(lastFire) < debounceInterval {
+					continue // ponytail: 底层库 PeekMessage+10ms 轮询在特定时序下同一按键触发两次 keydown, 用简单去重兜底
+				}
+				lastFire = now
 				slog.Info("hotkey triggered", "key", keystr)
 				callback()
 			}

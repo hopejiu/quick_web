@@ -49,8 +49,9 @@ func (c *Service) RegisterEntry(entry settings.SiteEntry, toggle ToggleFunc) {
 			c.wm.SiteHide(entry.ID)
 			return
 		}
-		c.wm.SiteShow(entry.ID, entry.URL, entry.Name)
-		if c.onShow != nil {
+		created := c.wm.SiteShow(entry.ID, entry.URL, entry.Name)
+		// 仅新创建的窗口需要注入脚本
+		if created && c.onShow != nil {
 			c.onShow(entry.ID, c.wm.SiteWindow(entry.ID))
 		}
 	})
@@ -118,10 +119,4 @@ func (c *Service) InjectScripts(entryID, scriptDir string, win application.Windo
 	}()
 }
 
-// InjectFocusScript 注入焦点脚本（单次，不重试）
-func (c *Service) InjectFocusScript(focusJS string, win application.Window) {
-	if win == nil || focusJS == "" {
-		return
-	}
-	win.ExecJS(focusJS)
-}
+

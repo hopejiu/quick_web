@@ -2,6 +2,7 @@ package webview
 
 import (
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -13,6 +14,7 @@ const destroyTimeout = 1 * time.Minute
 
 // Manager 管理 WebView 窗口的生命周期
 type Manager struct {
+	mu           sync.Mutex
 	win          application.Window
 	destroyTimer *time.Timer
 	forceClose   atomic.Bool
@@ -33,51 +35,68 @@ func New(app *application.App) *Manager {
 
 // Window 返回当前主窗口实例
 func (m *Manager) Window() application.Window {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.win
 }
 
-// Show 显示主窗口
-func (m *Manager) Show() {
+// Show 显示主窗口，返回是否是新创建的窗口
+func (m *Manager) Show() bool {
+	m.mu.Lock()
 	if m.destroyTimer != nil {
 		m.destroyTimer.Stop()
 		m.destroyTimer = nil
 	}
+	created := false
 	if m.win == nil {
 		slog.Info("creating main window")
 		m.win = m.createWindow("main", "https://chat.deepseek.com", "DeepSeek", 1200, 800,
 			func() { m.Hide() },
 		)
+		created = true
 	}
-	m.bringToFront(m.win)
+	w := m.win
+	m.mu.Unlock()
+	m.bringToFront(w)
+	return created
 }
 
 // Hide 隐藏主窗口
 func (m *Manager) Hide() {
-	if m.win == nil {
+	m.mu.Lock()
+	w := m.win
+	if w == nil {
+		m.mu.Unlock()
 		return
 	}
-	m.win.Hide()
+	m.mu.Unlock()
+	w.Hide()
 	m.startDestroyTimer()
 }
 
 // IsVisible 返回主窗口是否可见
 func (m *Manager) IsVisible() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.win != nil && m.win.IsVisible()
 }
 
-// SiteShow 显示站点窗口
-func (m *Manager) SiteShow(entryID, url, title string) {
+// SiteShow 显示站点窗口，返回是否是新创建的窗口
+func (m *Manager) SiteShow(entryID, url, title string) bool {
 	if t, ok := m.siteTimers[entryID]; ok {
 		t.Stop()
 		delete(m.siteTimers, entryID)
 	}
+	created := false
 	if _, ok := m.siteWindows[entryID]; !ok {
 		slog.Info("creating site window", "entry", entryID, "url", url)
 		m.siteWindows[entryID] = m.createWindow("site-"+entryID, url, title, 1200, 800,
 			func() { m.SiteHide(entryID) },
 		)
+		created = true
 	}
 	m.bringToFront(m.siteWindows[entryID])
+	return created
 }
 
 // SiteHide 隐藏站点窗口
@@ -155,20 +174,22 @@ func (m *Manager) bringToFront(w application.Window) {
 }
 
 func (m *Manager) startDestroyTimer() {
+	m.mu.Lock()
 	if m.destroyTimer != nil {
 		m.destroyTimer.Stop()
 	}
 	m.destroyTimer = time.AfterFunc(destroyTimeout, func() {
 		slog.Info("destroy timer expired, closing main window")
+		m.mu.Lock()
 		m.forceClose.Store(true)
-		application.InvokeSync(func() {
-			if m.win != nil {
-				m.win.Close()
-				m.win = nil
-			}
-		})
+		if m.win != nil {
+			m.win.Close()
+			m.win = nil
+		}
 		m.forceClose.Store(false)
+		m.mu.Unlock()
 	})
+	m.mu.Unlock()
 }
 
 func (m *Manager) startSiteDestroyTimer(entryID string) {
