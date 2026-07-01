@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import {invoke} from "@tauri-apps/api/core";
 
 // ---- DOM ----
 const $ = (id) => document.getElementById(id);
@@ -133,8 +133,7 @@ function updateModButtons() {
 
 function updateHotkeyPreview() {
   const key = entryKeySelect.value;
-  const hk = key ? selectedMod + "+" + key : "未设置";
-  hotkeyDisplay.textContent = hk;
+  hotkeyDisplay.textContent = key ? selectedMod + "+" + key : "未设置";
 }
 
 function clearConflict() {
@@ -219,13 +218,27 @@ document.querySelectorAll("#modBtns .hotkey-btn").forEach(btn => {
     updateKeyOptions();
     updateHotkeyPreview();
     clearConflict();
+    checkCurrentHotkey();
   });
 });
 
 entryKeySelect.addEventListener("change", () => {
   updateHotkeyPreview();
   clearConflict();
+  checkCurrentHotkey();
 });
+
+async function checkCurrentHotkey() {
+  const key = entryKeySelect.value;
+  if (!key) return;
+  const hk = selectedMod + "+" + key;
+  try {
+    await invoke("check_hotkey", { hotkey: hk, editingId: editingId });
+    clearConflict();
+  } catch (err) {
+    hotkeyConflict.textContent = "⚠ " + (err?.message || String(err));
+  }
+}
 
 // ---- 弹窗事件 ----
 addEntryBtn.addEventListener("click", () => openModal(null));

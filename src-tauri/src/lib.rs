@@ -252,10 +252,11 @@ fn toggle_site_window(app: &AppHandle, entry: &settings::SiteEntry) {
 
 // ── 热键同步 ──
 
-/// 重新注册所有热键
-fn sync_hotkeys(app: &AppHandle, state: &AppState, new: &settings::Settings) {
+/// 重新注册所有热键，返回注册失败的快捷键列表
+fn sync_hotkeys(app: &AppHandle, state: &AppState, new: &settings::Settings) -> Vec<(String, String)> {
     let mut map = state.hotkey_map.lock().unwrap();
     let shortcut_manager = app.global_shortcut();
+    let mut failures = Vec::new();
 
     // 注销所有旧热键
     for hk in map.keys() {
@@ -275,17 +276,56 @@ fn sync_hotkeys(app: &AppHandle, state: &AppState, new: &settings::Settings) {
                 let shortcut = Shortcut::new(Some(mods), code);
                 if let Err(e) = shortcut_manager.register(shortcut) {
                     warn!("hotkey register failed: {} ({})", entry.hotkey, e);
+                    failures.push((entry.hotkey.clone(), e.to_string()));
                 } else {
                     map.insert(entry.hotkey.clone(), entry.id.clone());
                     info!("hotkey registered: {} → {}", entry.hotkey, entry.name);
                 }
             }
-            Err(e) => warn!("invalid hotkey {}: {}", entry.hotkey, e),
+            Err(e) => {
+                warn!("invalid hotkey {}: {}", entry.hotkey, e);
+                failures.push((entry.hotkey.clone(), e));
+            }
         }
     }
+
+    failures
 }
 
 // ── Tauri Commands ──
+
+/// 检查快捷键是否可被注册
+/// 若该快捷键已被当前 entry（editing_id）持有，直接视为可用
+#[tauri::command]
+fn check_hotkey(
+    app: AppHandle,
+    hotkey: String,
+    editing_id: Option<String>,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let map = state.hotkey_map.lock().unwrap();
+
+    // 如果该快捷键已注册给当前 entry，直接视为可用
+    if let Some(entry_id) = map.get(&hotkey) {
+        return if editing_id.as_ref() == Some(entry_id) {
+            Ok(())
+        } else {
+            Err("已被其他站点占用".into())
+        };
+    }
+    drop(map);
+
+    // 未注册过，临时注册验证系统可用性
+    let shortcut_manager = app.global_shortcut();
+    let (mods, code) = parse_hotkey(&hotkey)?;
+    let shortcut = Shortcut::new(Some(mods), code.clone());
+    if let Err(e) = shortcut_manager.register(shortcut) {
+        return Err(format!("无法注册: {}", e));
+    }
+    // 立即注销，不影响现有状态
+    let _ = shortcut_manager.unregister(Shortcut::new(Some(mods), code));
+    Ok(())
+}
 
 #[tauri::command]
 fn get_settings(state: tauri::State<AppState>) -> settings::Settings {
@@ -314,8 +354,8 @@ fn save_settings(
         let _ = autostart.disable();
     }
 
-    // 热键同步（diff 变更的条目）
-    sync_hotkeys(&app, &state, &data);
+    // 热键同步（收集注册失败的快捷键）
+    let failures = sync_hotkeys(&app, &state, &data);
 
     // 销毁已删除条目的窗口
     for old_entry in &old.entries {
@@ -329,6 +369,17 @@ fn save_settings(
 
     app.emit("settings-saved", &data).ok();
     info!("settings saved");
+
+    // 有关键键注册失败则返回错误信息
+    if !failures.is_empty() {
+        let msg = failures
+            .iter()
+            .map(|(hk, err)| format!("{}: {}", hk, err))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("设置已保存，但以下快捷键注册失败: {}", msg));
+    }
+
     Ok(())
 }
 
@@ -511,7 +562,11 @@ pub fn run() {
 
             // ---- 注册热键 ----
             let state_ref = app.state::<AppState>();
-            sync_hotkeys(app.handle(), state_ref.inner(), &state_ref.settings.lock().unwrap().clone());
+            let init_failures = sync_hotkeys(app.handle(), state_ref.inner(), &state_ref.settings.lock().unwrap().clone());
+            if !init_failures.is_empty() {
+                let msg = init_failures.iter().map(|(hk, err)| format!("{}: {}", hk, err)).collect::<Vec<_>>().join("; ");
+                warn!("initial hotkey registration failures: {}", msg);
+            }
 
             // ---- 首次释放脚本 ----
             if !state_ref.settings.lock().unwrap().scripts_released {
@@ -606,6 +661,7 @@ pub fn run() {
             show_settings_window,
             inject_scripts,
             release_embedded_scripts,
+            check_hotkey,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
