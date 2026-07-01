@@ -51,9 +51,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install dependencies
-        run: |
-          echo "verify-store-integrity=false" >> .npmrc
-          pnpm install --no-frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build Tauri app
         run: pnpm tauri build
