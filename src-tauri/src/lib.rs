@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -29,6 +31,7 @@ struct AppState {
     settings: Mutex<settings::Settings>,
     hotkey_map: Mutex<HashMap<String, String>>,
     window_manager: WindowManager,
+    hide_timers: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 // ── 窗口工具 ──
@@ -39,13 +42,13 @@ fn bring_to_front(window: &tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
-/// 启动窗口销毁定时器（5 秒后销毁隐藏的窗口）
+/// 启动窗口销毁定时器（20 秒后销毁隐藏的窗口）
 /// 通过事件通知主线程执行 close，避免跨线程操作窗口
 fn start_destroy_timer(app: &AppHandle, label: String) {
     let app = app.clone();
     std::thread::spawn(move || {
-        info!("destroy timer started for {} (5s)", label);
-        std::thread::sleep(Duration::from_secs(5));
+        info!("destroy timer started for {} (20s)", label);
+        std::thread::sleep(Duration::from_secs(20));
         if app.get_webview_window(&label).is_some() {
             info!("destroy timer fired, emitting close-request for {}", label);
             if let Err(e) = app.emit("request-close-window", &label) {
@@ -112,6 +115,55 @@ fn show_site_window(app: &AppHandle, entry: &settings::SiteEntry) -> tauri::Webv
                     error!("failed to hide window {}: {}", label_clone, e);
                 } else {
                     start_destroy_timer(&app_clone, label_clone.clone());
+                }
+            }
+            WindowEvent::Focused(false) => {
+                info!(
+                    "window {} lost focus, starting 10s hide timer",
+                    label_clone
+                );
+                // 取消该窗口之前的 pending 定时器
+                if let Some(old_cancel) = app_clone
+                    .state::<AppState>()
+                    .hide_timers
+                    .lock()
+                    .unwrap()
+                    .remove(&label_clone)
+                {
+                    old_cancel.store(true, Ordering::Relaxed);
+                }
+                let cancel = Arc::new(AtomicBool::new(false));
+                app_clone
+                    .state::<AppState>()
+                    .hide_timers
+                    .lock()
+                    .unwrap()
+                    .insert(label_clone.clone(), cancel.clone());
+                let app = app_clone.clone();
+                let label = label_clone.clone();
+                let win = win_clone.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(10));
+                    if !cancel.load(Ordering::Relaxed) {
+                        info!("10s blur timer fired, hiding window {}", label);
+                        if let Err(e) = win.hide() {
+                            error!("failed to hide window {}: {}", label, e);
+                        } else {
+                            start_destroy_timer(&app, label);
+                        }
+                    }
+                });
+            }
+            WindowEvent::Focused(true) => {
+                // 窗口重新获得焦点，取消 pending 定时器
+                if let Some(cancel) = app_clone
+                    .state::<AppState>()
+                    .hide_timers
+                    .lock()
+                    .unwrap()
+                    .get(&label_clone)
+                {
+                    cancel.store(true, Ordering::Relaxed);
                 }
             }
             _ => {}
@@ -392,6 +444,7 @@ pub fn run() {
                 settings: Mutex::new(initial_settings_for_state),
                 hotkey_map: Mutex::new(hotkey_map),
                 window_manager: WindowManager::new(),
+                hide_timers: Mutex::new(HashMap::new()),
             });
 
             // 设置窗口
