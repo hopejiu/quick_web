@@ -167,6 +167,7 @@ pub fn sync_hotkeys(
     let new_map: HashMap<String, String> = new
         .entries
         .iter()
+        .filter(|e| e.enabled)
         .filter_map(|e| e.hotkey.as_ref().map(|hk| (hk.to_string(), e.id.clone())))
         .collect();
 

@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 use crate::hotkey::Hotkey;
 
+fn default_enabled() -> bool {
+    true
+}
+
 /// 站点配置条目
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,6 +22,8 @@ pub struct SiteEntry {
     )]
     pub hotkey: Option<Hotkey>,
     pub script_dir: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 /// 自定义 Hotkey 序列化：None → 省略字段；Some(hk) → "Alt+E" 字符串
@@ -65,6 +71,7 @@ impl Default for Settings {
                 name: "DeepSeek Chat".into(),
                 hotkey: Some(Hotkey::from_str("Alt+E").expect("default hotkey is valid")),
                 script_dir: "chat.deepseek.com".into(),
+                enabled: true,
             }],
             auto_start: false,
             start_minimized: false,
@@ -110,6 +117,7 @@ pub fn load() -> Settings {
                     name: "DeepSeek Chat".into(),
                     hotkey: hk_opt,
                     script_dir: "chat.deepseek.com".into(),
+                    enabled: true,
                 });
                 s.scripts_released = false;
             }

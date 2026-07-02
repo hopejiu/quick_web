@@ -71,6 +71,10 @@ function renderSiteList() {
         </div>
       </div>
       <div class="site-actions">
+        <label class="toggle toggle-sm" onclick="event.stopPropagation()">
+          <input type="checkbox" ${e.enabled !== false ? 'checked' : ''} data-id="${escAttr(e.id)}" onchange="toggleEntry('${escAttr(e.id)}', this.checked)"/>
+          <span class="toggle-slider"></span>
+        </label>
         <button class="icon-btn" title="打开脚本目录" onclick="openScriptDir('${escAttr(e.script_dir)}')">📁</button>
         <button class="icon-btn" title="编辑" onclick="editEntry('${escAttr(e.id)}')">✏️</button>
         ${e.id !== 'default' ? `<button class="icon-btn danger" title="删除" onclick="deleteEntry('${escAttr(e.id)}')">🗑️</button>` : ''}
@@ -280,7 +284,8 @@ saveEntryBtn.addEventListener("click", async () => {
     url,
     name,
     hotkey: hk,
-    script_dir: scriptDir || deriveDirFromUrl(url)
+    script_dir: scriptDir || deriveDirFromUrl(url),
+    enabled: true
   };
 
   // 更新 entries
@@ -342,6 +347,24 @@ window.deleteEntry = async (id) => {
   settings.entries = (settings.entries || []).filter(e => e.id !== id);
   await doSave();
   renderSiteList();
+};
+
+window.toggleEntry = async (id, enabled) => {
+  const entry = (settings.entries || []).find(e => e.id === id);
+  if (!entry) return;
+  entry.enabled = enabled;
+  try {
+    await invoke("save_settings", { data: settings });
+    renderSiteList();
+    showSaveStatus(enabled ? "快捷键已启用" : "快捷键已禁用");
+  } catch (err) {
+    entry.enabled = !enabled;
+    try {
+      await invoke("save_settings", { data: settings });
+    } catch {}
+    renderSiteList();
+    showSaveStatus(`快捷键注册失败: ${err?.message || String(err)}`, "error");
+  }
 };
 
 // ---- 开关事件 ----
